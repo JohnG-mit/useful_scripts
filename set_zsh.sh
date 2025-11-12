@@ -109,7 +109,6 @@ sed -i 's/^plugins=(git)$/plugins=(git zsh-autosuggestions zsh-syntax-highlighti
 
 # 添加 source 行
 echo "
-# --- 步骤 7 中添加的插件 source ---
 source $ZSH_CUSTOM/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
 source $ZSH_CUSTOM/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 " >> "$HOME/.zshrc"
