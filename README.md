@@ -27,20 +27,12 @@ FEISHU_SECRET=xxx
 
 运行:
 ```
-python3 traffic_report.py
-```
-
-或者直接运行包内脚本：
-```
 python3 src/traffic_report/traffic_report.py
 ```
 
 CLI 选项（支持 `--help`）:
     - `--env-file`：指定 dotenv 文件的路径，在运行前加载
 
-安装 Systemd 示例:
-```
-sudo useful_scripts/deploy/install_systemd.sh --python /usr/bin/python3 --workdir /home/ubuntu/useful_scripts
 ```
 安装 cron 示例:
 ```
@@ -49,6 +41,5 @@ sudo useful_scripts/deploy/install_cron.sh
 
 卸载示例:
 ```
-sudo useful_scripts/deploy/uninstall_systemd.sh
 sudo useful_scripts/deploy/uninstall_cron.sh [user]
 ```
