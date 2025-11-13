@@ -116,7 +116,6 @@ echo "插件已在 .zshrc 中配置。"
 
 # --- 步骤 8: 添加 Alias ---
 echo "--- 步骤 8: 添加 Alias ---"
-# 使用 cat 和 EOF 来追加所有 alias
 cat <<EOF >> "$HOME/.zshrc"
 
 alias ll='ls -alFh'
