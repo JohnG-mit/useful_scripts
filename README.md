@@ -43,3 +43,38 @@ sudo useful_scripts/deploy/install_cron.sh
 ```
 sudo useful_scripts/deploy/uninstall_cron.sh [user]
 ```
+
+## sing-box 普通用户安装 (无 sudo)
+
+该脚本允许普通用户在无 sudo 权限的情况下配置 sing-box 代理。
+
+### 功能
+1. 自动下载最新版 sing-box 并安装到 `~/bin`。
+2. 自动下载 `geosite.dat` 和 `geoip.dat` 规则文件。
+3. 根据提供的订阅文件（包含 `vless://`, `hysteria2://`, `tuic://` 链接）生成最终配置文件 `config.json`。
+4. 配置 systemd user service 实现开机自启和自动重启。
+5. 日志通过 systemd journal 管理，自动轮转。
+
+### 使用方法
+
+1. 准备一个包含订阅链接的文本文件（例如 `subscribe.txt`），每行一个链接。
+2. 运行安装脚本：
+
+```bash
+bash src/sing-box/install.sh
+```
+
+3. 脚本会提示输入订阅文件的路径。
+4. 安装完成后，服务会自动启动。
+
+### 管理命令
+
+- 启动服务: `systemctl --user start sing-box`
+- 停止服务: `systemctl --user stop sing-box`
+- 重启服务: `systemctl --user restart sing-box`
+- 查看状态: `systemctl --user status sing-box`
+- 查看日志: `journalctl --user -u sing-box -f`
+
+### 注意事项
+- 确保 `~/bin` 在你的 PATH 环境变量中（脚本会自动尝试添加）。
+- 默认监听端口为 7897 (SOCKS/Mixed)。
