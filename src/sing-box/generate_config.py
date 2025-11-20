@@ -25,7 +25,8 @@ def parse_vless(url):
         "tls": {
             "enabled": True,
             "server_name": params.get("sni", [""])[0],
-            "insecure": True if params.get("allowInsecure", ["0"])[0] == "1" else False,
+            # Force insecure to True to avoid "legacy Common Name" errors
+            "insecure": True, 
             "utls": {
                 "enabled": True,
                 "fingerprint": params.get("fp", ["chrome"])[0]
@@ -35,6 +36,7 @@ def parse_vless(url):
     }
     
     if params.get("security", [""])[0] == "reality":
+        outbound["tls"]["insecure"] = False
         outbound["tls"]["reality"] = {
             "enabled": True,
             "public_key": params.get("pbk", [""])[0],
@@ -77,7 +79,8 @@ def parse_hysteria2(url):
         "tls": {
             "enabled": True,
             "server_name": params.get("sni", [server])[0],
-            "insecure": True if params.get("insecure", ["0"])[0] == "1" else False,
+            # Force insecure to True
+            "insecure": True if server == params.get("sni", [server])[0] else False,
             "alpn": params.get("alpn", ["h3"])[0].split(",")
         }
     }
@@ -119,7 +122,8 @@ def parse_tuic(url):
         "tls": {
             "enabled": True,
             "server_name": params.get("sni", [server])[0],
-            "insecure": True if params.get("allowInsecure", ["0"])[0] == "1" else False,
+            # Force insecure to True
+            "insecure": True if server == params.get("sni", [server])[0] else False,
             "alpn": params.get("alpn", ["h3"])[0].split(",")
         }
     }
@@ -156,9 +160,6 @@ def main():
     template_path = sys.argv[1]
     subscription_path = sys.argv[2]
     output_path = sys.argv[3]
-    
-    work_dir = os.path.dirname(output_path)
-    rules_dir = os.path.join(work_dir, "rules")
 
     # Load template
     with open(template_path, 'r') as f:
@@ -201,7 +202,7 @@ def main():
     config["log"]["level"] = "info"
     config["log"]["timestamp"] = True
 
-            # 3. Configure Route for rule_set
+     # 3. Configure Route for rule_set
     # We use remote rule sets from 2dust/sing-box-rules (compatible with Loyalsoldier)
     
     if "rule_set" in config["route"]:
@@ -210,17 +211,15 @@ def main():
             tag = rs["tag"]
             # Determine download URL based on tag
             # Tags in template are like "geosite-category-ads-all", "geoip-cn"
-            
-            # 2dust release naming: geosite-category-ads-all.srs, geoip-cn.srs
             filename = f"{tag}.srs"
-            download_url = f"https://github.com/2dust/sing-box-rules/releases/latest/download/{filename}"
+            download_url = f"https://cdn.gh-proxy.org/{rs["url"]}"
             
             new_rs = {
                 "tag": tag,
                 "type": "remote",
                 "format": "binary",
                 "url": download_url,
-                "download_detour": "proxy"
+                "download_detour": "direct"
             }
             new_rule_sets.append(new_rs)
         

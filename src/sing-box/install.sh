@@ -70,7 +70,7 @@ else
     DOWNLOAD_URL=$(python3 -c "
 import urllib.request, json, sys
 try:
-    url = 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
+    url = 'https://edgeone.gh-proxy.org/https://api.github.com/repos/SagerNet/sing-box/releases/latest'
     with urllib.request.urlopen(url) as response:
         data = json.loads(response.read().decode())
         for asset in data['assets']:
