@@ -25,8 +25,7 @@ def parse_vless(url):
         "tls": {
             "enabled": True,
             "server_name": params.get("sni", [""])[0],
-            # Force insecure to True to avoid "legacy Common Name" errors
-            "insecure": True, 
+            "insecure": False, 
             "utls": {
                 "enabled": True,
                 "fingerprint": params.get("fp", ["chrome"])[0]
@@ -80,7 +79,7 @@ def parse_hysteria2(url):
             "enabled": True,
             "server_name": params.get("sni", [server])[0],
             # Force insecure to True
-            "insecure": True if server == params.get("sni", [server])[0] else False,
+            "insecure": False if server == params.get("sni", [server])[0] else True,
             "alpn": params.get("alpn", ["h3"])[0].split(",")
         }
     }
@@ -123,7 +122,7 @@ def parse_tuic(url):
             "enabled": True,
             "server_name": params.get("sni", [server])[0],
             # Force insecure to True
-            "insecure": True if server == params.get("sni", [server])[0] else False,
+            "insecure": False if server == params.get("sni", [server])[0] else True,
             "alpn": params.get("alpn", ["h3"])[0].split(",")
         }
     }
