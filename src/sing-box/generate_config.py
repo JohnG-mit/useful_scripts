@@ -212,7 +212,7 @@ def main():
             # Determine download URL based on tag
             # Tags in template are like "geosite-category-ads-all", "geoip-cn"
             filename = f"{tag}.srs"
-            download_url = f"https://cdn.gh-proxy.org/{rs["url"]}"
+            download_url = f"https://cdn.gh-proxy.org/{rs['url']}"
             
             new_rs = {
                 "tag": tag,
