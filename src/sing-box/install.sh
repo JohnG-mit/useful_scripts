@@ -6,7 +6,6 @@ set -e
 SERVICE_NAME="sing-box"
 INSTALL_DIR="$HOME/bin"
 WORK_DIR="$HOME/service/$SERVICE_NAME"
-RULES_DIR="$WORK_DIR/rules"
 CONFIG_FILE="$WORK_DIR/config.json"
 TEMPLATE_FILE="$(dirname "$0")/config_template.json"
 GENERATE_SCRIPT="$(dirname "$0")/generate_config.py"
@@ -110,18 +109,12 @@ fi
 # 3. Prepare Directories
 log "Preparing directories..."
 mkdir -p "$WORK_DIR"
-mkdir -p "$RULES_DIR"
 
-# 4. Download Rules
-# Rules will be downloaded automatically by sing-box using remote rule-sets.
-# We just ensure the directory exists.
-log "Rules directory prepared at $RULES_DIR"
-
-# 5. Generate Config
+# 4. Generate Config
 log "Generating config.json..."
 python3 "$GENERATE_SCRIPT" "$TEMPLATE_FILE" "$SUBSCRIPTION_PATH" "$CONFIG_FILE"
 
-# 6. Setup Systemd Service
+# 5. Setup Systemd Service
 log "Setting up systemd service..."
 mkdir -p "$SYSTEMD_DIR"
 mkdir -p "$WORK_DIR/ui"
