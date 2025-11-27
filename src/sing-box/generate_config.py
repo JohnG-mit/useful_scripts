@@ -79,7 +79,7 @@ def parse_hysteria2(url):
             "enabled": True,
             "server_name": params.get("sni", [server])[0],
             # Force insecure to True
-            "insecure": False if server == params.get("sni", [server])[0] else True,
+            "insecure": False if server == params.get("sni", [""])[0] else True,
             "alpn": params.get("alpn", ["h3"])[0].split(",")
         }
     }
@@ -122,7 +122,7 @@ def parse_tuic(url):
             "enabled": True,
             "server_name": params.get("sni", [server])[0],
             # Force insecure to True
-            "insecure": False if server == params.get("sni", [server])[0] else True,
+            "insecure": False if server == params.get("sni", [""])[0] else True,
             "alpn": params.get("alpn", ["h3"])[0].split(",")
         }
     }
@@ -153,91 +153,102 @@ def parse_subscription(file_path):
 
 def main():
     if len(sys.argv) < 4:
-        print("Usage: python3 generate_config.py <template_path> <subscription_path> <output_path>")
+        print("Usage: python3 generate_config.py <template_path> <subscription_path> <output_path> [--append <existing_config>]")
         sys.exit(1)
 
     template_path = sys.argv[1]
     subscription_path = sys.argv[2]
     output_path = sys.argv[3]
-
-    # Load template
-    with open(template_path, 'r') as f:
-        config = json.load(f)
-
-    # Parse subscription
-    outbounds = parse_subscription(subscription_path)
     
-    if not outbounds:
+    # 检查是否为追加模式
+    append_mode = False
+    existing_config_path = None
+    if len(sys.argv) >= 6 and sys.argv[4] == "--append":
+        append_mode = True
+        existing_config_path = sys.argv[5]
+
+    # Parse subscription (新订阅)
+    new_outbounds = parse_subscription(subscription_path)
+    
+    if not new_outbounds:
         print("Error: No valid outbounds found in subscription file.")
         sys.exit(1)
 
-    # 1. Inject outbounds
-    config["outbounds"].extend(outbounds)
-    
-    # Create a selector outbound named "proxy" that includes all parsed outbounds
-    outbound_tags = [o["tag"] for o in outbounds]
-    
-    # Check if "proxy" selector already exists (it shouldn't in our template, but good to check)
-    proxy_selector = next((o for o in config["outbounds"] if o["tag"] == "proxy" and o["type"] == "selector"), None)
-    
-    if proxy_selector:
-        proxy_selector["outbounds"].extend(outbound_tags)
-    else:
-        # Create new proxy selector
-        proxy_selector = {
-            "type": "selector",
-            "tag": "proxy",
-            "outbounds": outbound_tags,
-            "default": outbound_tags[0] if outbound_tags else ""
-        }
-        # Insert at the beginning of outbounds list so it's easily accessible
-        config["outbounds"].insert(0, proxy_selector)
-
-    # 2. Fix Log Path
-    # Set log output to "sing-box.log" in the work dir.
-    if "log" not in config:
-        config["log"] = {}
-    config["log"]["output"] = "sing-box.log"
-    config["log"]["level"] = "info"
-    config["log"]["timestamp"] = True
-
-     # 3. Configure Route for rule_set
-    # We use remote rule sets from 2dust/sing-box-rules (compatible with Loyalsoldier)
-    
-    if "rule_set" in config["route"]:
-        new_rule_sets = []
-        for rs in config["route"]["rule_set"]:
-            tag = rs["tag"]
-            # Determine download URL based on tag
-            # Tags in template are like "geosite-category-ads-all", "geoip-cn"
-            filename = f"{tag}.srs"
-            download_url = f"https://cdn.gh-proxy.org/{rs['url']}"
-            
-            new_rs = {
-                "tag": tag,
-                "type": "remote",
-                "format": "binary",
-                "url": download_url,
-                "download_detour": "direct"
-            }
-            new_rule_sets.append(new_rs)
+    if append_mode and existing_config_path and os.path.exists(existing_config_path):
+        # 追加模式：基于现有配置
+        print(f"Append mode: Loading existing config from {existing_config_path}")
+        with open(existing_config_path, 'r') as f:
+            config = json.load(f)
         
-        config["route"]["rule_set"] = new_rule_sets
+        # 获取现有的 outbound tags（用于去重）
+        existing_tags = {o.get("tag") for o in config.get("outbounds", [])}
+        
+        # 获取现有的 proxy selector
+        proxy_selector = next((o for o in config["outbounds"] if o.get("tag") == "proxy" and o.get("type") == "selector"), None)
+        
+        # 只添加新的（不重复的）outbounds
+        added_count = 0
+        for outbound in new_outbounds:
+            if outbound["tag"] not in existing_tags:
+                config["outbounds"].append(outbound)
+                existing_tags.add(outbound["tag"])
+                added_count += 1
+                # 添加到 proxy selector
+                if proxy_selector:
+                    proxy_selector["outbounds"].append(outbound["tag"])
+        
+        print(f"Added {added_count} new outbounds (skipped {len(new_outbounds) - added_count} duplicates)")
+        
+    else:
+        # 替换模式：从模板生成
+        print(f"Replace mode: Loading template from {template_path}")
+        with open(template_path, 'r') as f:
+            config = json.load(f)
 
-    # 4. Convert rules
-    new_rules = []
-    for rule in config["route"]["rules"]:
-        new_rule = rule.copy()
+        # 注入所有 outbounds
+        config["outbounds"].extend(new_outbounds)
+        
+        # 创建 proxy selector
+        outbound_tags = [o["tag"] for o in new_outbounds]
+        
+        proxy_selector = next((o for o in config["outbounds"] if o.get("tag") == "proxy" and o.get("type") == "selector"), None)
+        
+        if proxy_selector:
+            proxy_selector["outbounds"].extend(outbound_tags)
+        else:
+            proxy_selector = {
+                "type": "selector",
+                "tag": "proxy",
+                "outbounds": outbound_tags,
+                "default": outbound_tags[0] if outbound_tags else ""
+            }
+            config["outbounds"].insert(0, proxy_selector)
+
+        # 设置日志
+        if "log" not in config:
+            config["log"] = {}
+        config["log"]["output"] = "sing-box.log"
+        config["log"]["level"] = "info"
+        config["log"]["timestamp"] = True
+
+        # 配置 rule_set 的下载代理
+        if "rule_set" in config.get("route", {}):
+            new_rule_sets = []
+            for rs in config["route"]["rule_set"]:
+                tag = rs["tag"]
+                filename = f"{tag}.srs"
+                download_url = f"https://cdn.gh-proxy.org/{rs['url']}"
+                
+                new_rs = {
+                    "tag": tag,
+                    "type": "remote",
+                    "format": "binary",
+                    "url": download_url,
+                    "download_detour": "direct"
+                }
+                new_rule_sets.append(new_rs)
             
-        new_rules.append(new_rule)
-
-    config["route"]["rules"] = new_rules
-    
-    # Fix dns rules as well?
-    # The template has "dns": { "rules": [...] }
-    # These also use rule_set.
-    # No changes needed for DNS rules as they already use rule_set tags which we preserved.
-
+            config["route"]["rule_set"] = new_rule_sets
 
     # Save config
     with open(output_path, 'w') as f:
