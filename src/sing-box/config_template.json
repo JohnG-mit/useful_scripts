@@ -442,7 +442,7 @@
       "external_ui": "ui",
       "secret": "",
       "external_ui_download_url": "https://cdn.gh-proxy.org/https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip",
-      "external_ui_download_detour": "direct",
+      "external_ui_download_detour": "proxy",
       "default_mode": "rule"
     },
     "cache_file": {

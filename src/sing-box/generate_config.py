@@ -237,14 +237,15 @@ def main():
             for rs in config["route"]["rule_set"]:
                 tag = rs["tag"]
                 filename = f"{tag}.srs"
-                download_url = f"https://cdn.gh-proxy.org/{rs['url']}"
+                # download_url = f"https://cdn.gh-proxy.org/{rs['url']}"
+                download_url = rs['url']
                 
                 new_rs = {
                     "tag": tag,
                     "type": "remote",
                     "format": "binary",
                     "url": download_url,
-                    "download_detour": "direct"
+                    "download_detour": "proxy"
                 }
                 new_rule_sets.append(new_rs)
             
