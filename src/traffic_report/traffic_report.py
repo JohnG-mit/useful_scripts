@@ -204,11 +204,11 @@ def send_feishu_message(message):
     if FEISHU_SECRET:
         timestamp = int(time.time())
         sign = gen_feishu_sign(timestamp, FEISHU_SECRET)
-        sep = '&' if '?' in webhook_url else '?'
-        webhook_url = f"{webhook_url}{sep}timestamp={timestamp}&sign={sign}"
+        payload["timestamp"] = timestamp
+        payload["sign"] = sign
 
     try:
-        response = requests.post(webhook_url, headers=headers, json=payload, timeout=15)
+        response = requests.post(FEISHU_WEBHOOK_URL, headers=headers, json=payload, timeout=15)
         response.raise_for_status()
         result = response.json()
         if result.get("code") == 0 or result.get("StatusCode") == 0:
