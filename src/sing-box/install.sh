@@ -25,6 +25,39 @@ error() {
     echo -e "${RED}[ERROR] $1${NC}"
 }
 
+is_port_in_use() {
+    local port="$1"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn "sport = :$port" 2>/dev/null | tail -n +2 | grep -q .
+        return
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+        return
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | grep -E "[.:]$port[[:space:]]" >/dev/null
+        return
+    fi
+
+    error "Neither ss, lsof nor netstat is available to detect port usage."
+    exit 1
+}
+
+find_available_port() {
+    local start_port="$1"
+    local port="$start_port"
+
+    while is_port_in_use "$port"; do
+        port=$((port + 1))
+    done
+
+    echo "$port"
+}
+
 # Check Python
 if ! command -v python3 &> /dev/null; then
     error "Python3 is required but not found."
@@ -69,7 +102,7 @@ else
     DOWNLOAD_URL=$(python3 -c "
 import urllib.request, json, sys
 try:
-    url = 'https://edgeone.gh-proxy.org/https://api.github.com/repos/SagerNet/sing-box/releases/latest'
+    url = 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
     with urllib.request.urlopen(url) as response:
         data = json.loads(response.read().decode())
         for asset in data['assets']:
@@ -85,6 +118,7 @@ except Exception as e:
         error "Failed to find download URL for sing-box."
         exit 1
     fi
+    DOWNLOAD_URL="https://ghproxy.net/${DOWNLOAD_URL}"
 
     log "Downloading sing-box from $DOWNLOAD_URL..."
     mkdir -p "$INSTALL_DIR"
@@ -113,6 +147,54 @@ mkdir -p "$WORK_DIR"
 # 4. Generate Config
 log "Generating config.json..."
 python3 "$GENERATE_SCRIPT" "$TEMPLATE_FILE" "$SUBSCRIPTION_PATH" "$CONFIG_FILE"
+
+# 4.1 Resolve local port conflicts
+MIXED_PORT=$(find_available_port 7897)
+CLASH_API_PORT=$(find_available_port 9090)
+
+if [ "$MIXED_PORT" -ne 7897 ]; then
+    log "Port 7897 is in use, switched mixed inbound port to $MIXED_PORT"
+else
+    log "Port 7897 is available, using mixed inbound port 7897"
+fi
+
+if [ "$CLASH_API_PORT" -ne 9090 ]; then
+    log "Port 9090 is in use, switched clash API port to $CLASH_API_PORT"
+else
+    log "Port 9090 is available, using clash API port 9090"
+fi
+
+python3 - "$CONFIG_FILE" "$MIXED_PORT" "$CLASH_API_PORT" <<'PY'
+import json
+import sys
+
+config_path = sys.argv[1]
+mixed_port = int(sys.argv[2])
+clash_api_port = int(sys.argv[3])
+
+with open(config_path, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+for inbound in config.get("inbounds", []):
+    if inbound.get("type") == "mixed":
+        inbound["listen_port"] = mixed_port
+        break
+
+clash_api = config.get("experimental", {}).get("clash_api", {})
+external_controller = clash_api.get("external_controller")
+if isinstance(external_controller, str) and ":" in external_controller:
+    host = external_controller.rsplit(":", 1)[0]
+else:
+    host = "127.0.0.1"
+clash_api["external_controller"] = f"{host}:{clash_api_port}"
+
+if "experimental" not in config:
+    config["experimental"] = {}
+config["experimental"]["clash_api"] = clash_api
+
+with open(config_path, "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2)
+PY
 
 # 5. Setup Systemd Service
 log "Setting up systemd service..."
