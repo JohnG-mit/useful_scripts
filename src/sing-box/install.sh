@@ -11,6 +11,7 @@ TEMPLATE_FILE="$(dirname "$0")/config_template.json"
 GENERATE_SCRIPT="$(dirname "$0")/generate_config.py"
 IMPORT_JSON_SCRIPT="$(dirname "$0")/import_outbounds_json.py"
 SETUP_SERVICE_SCRIPT="$(dirname "$0")/setup_user_service.sh"
+SETUP_LOGROTATE_SCRIPT="$(dirname "$0")/setup_user_logrotate.sh"
 SB_SCRIPT="$(dirname "$0")/sb.sh"
 
 # Colors
@@ -279,6 +280,15 @@ fi
 
 log "Setting up user-level systemd service..."
 bash "$SETUP_SERVICE_SCRIPT"
+
+# 7. Setup user-level log rotation timer
+if [ ! -f "$SETUP_LOGROTATE_SCRIPT" ]; then
+    error "Log rotation setup script not found: $SETUP_LOGROTATE_SCRIPT"
+    exit 1
+fi
+
+log "Setting up user-level log rotation timer..."
+bash "$SETUP_LOGROTATE_SCRIPT"
 
 log "sing-box service installed and started!"
 log "Run 'sb' to open the command menu."
