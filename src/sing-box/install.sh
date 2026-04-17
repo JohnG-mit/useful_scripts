@@ -59,6 +59,33 @@ find_available_port() {
     echo "$port"
 }
 
+stop_existing_singbox() {
+    local service_active="false"
+    local process_exists="false"
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        service_active="true"
+    fi
+
+    if command -v pgrep >/dev/null 2>&1 && pgrep -u "$USER" -x sing-box >/dev/null 2>&1; then
+        process_exists="true"
+    fi
+
+    if [ "$service_active" = "false" ] && [ "$process_exists" = "false" ]; then
+        return
+    fi
+
+    if [ "$service_active" = "true" ]; then
+        log "Stopping existing user-level sing-box service..."
+        systemctl --user stop "$SERVICE_NAME" || true
+    fi
+
+    if [ "$process_exists" = "true" ]; then
+        log "Terminating existing sing-box process..."
+        pkill -u "$USER" -x sing-box || true
+    fi
+}
+
 # Check Python
 if ! command -v python3 &> /dev/null; then
     error "Python3 is required but not found."
@@ -103,6 +130,9 @@ if [ ! -f "$SUBSCRIPTION_PATH" ]; then
     error "File not found: $SUBSCRIPTION_PATH"
     exit 1
 fi
+
+# Stop any running user-level sing-box before reinstalling.
+stop_existing_singbox
 
 # 2. Download and Install sing-box
 if [ -f "$INSTALL_DIR/sing-box" ]; then
