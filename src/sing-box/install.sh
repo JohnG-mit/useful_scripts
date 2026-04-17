@@ -9,8 +9,9 @@ WORK_DIR="$HOME/service/$SERVICE_NAME"
 CONFIG_FILE="$WORK_DIR/config.json"
 TEMPLATE_FILE="$(dirname "$0")/config_template.json"
 GENERATE_SCRIPT="$(dirname "$0")/generate_config.py"
-SYSTEMD_DIR="$HOME/.config/systemd/user"
-SERVICE_FILE="$SYSTEMD_DIR/$SERVICE_NAME.service"
+IMPORT_JSON_SCRIPT="$(dirname "$0")/import_outbounds_json.py"
+SETUP_SERVICE_SCRIPT="$(dirname "$0")/setup_user_service.sh"
+SB_SCRIPT="$(dirname "$0")/sb.sh"
 
 # Colors
 GREEN='\033[0;32m'
@@ -64,13 +65,39 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
+mkdir -p "$INSTALL_DIR"
+
 # 1. Get Subscription File
-echo "Please provide the path to your subscription file (txt)."
-echo "This file should contain a list of subscription links (vless://, hysteria2://, tuic://)."
-read -p "Path: " SUBSCRIPTION_PATH
+echo "Please provide one of the following input sources:"
+echo "1) Subscription links file path (txt, one link per line: vless://, hysteria2://, tuic://)"
+echo "2) JSON file path prefixed with @ (example: @sub.json)"
+read -p "Path: " INPUT_PATH
+
+# Trim leading/trailing whitespace to avoid accidental parse failures.
+INPUT_PATH="$(printf '%s' "$INPUT_PATH" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+SOURCE_MODE="links"
+
+case "$INPUT_PATH" in
+    @*)
+        SOURCE_MODE="json"
+        INPUT_PATH="${INPUT_PATH#@}"
+        ;;
+esac
 
 # Expand ~ to home directory
-SUBSCRIPTION_PATH="${SUBSCRIPTION_PATH/#\~/$HOME}"
+SUBSCRIPTION_PATH="${INPUT_PATH/#\~/$HOME}"
+
+if [ "$SOURCE_MODE" = "links" ] && [ "${SUBSCRIPTION_PATH%.json}" != "$SUBSCRIPTION_PATH" ]; then
+    SOURCE_MODE="json"
+    log "Detected .json file path, switching to JSON import mode."
+fi
+
+# Safety fallback: if path still contains @ prefix, strip it and force JSON mode.
+if [ ! -f "$SUBSCRIPTION_PATH" ] && [ "${SUBSCRIPTION_PATH#@}" != "$SUBSCRIPTION_PATH" ]; then
+    SOURCE_MODE="json"
+    SUBSCRIPTION_PATH="${SUBSCRIPTION_PATH#@}"
+fi
 
 if [ ! -f "$SUBSCRIPTION_PATH" ]; then
     error "File not found: $SUBSCRIPTION_PATH"
@@ -121,7 +148,6 @@ except Exception as e:
     DOWNLOAD_URL="https://ghproxy.net/${DOWNLOAD_URL}"
 
     log "Downloading sing-box from $DOWNLOAD_URL..."
-    mkdir -p "$INSTALL_DIR"
     curl -L -o sing-box.tar.gz "$DOWNLOAD_URL"
 
     log "Installing sing-box..."
@@ -145,8 +171,18 @@ log "Preparing directories..."
 mkdir -p "$WORK_DIR"
 
 # 4. Generate Config
-log "Generating config.json..."
-python3 "$GENERATE_SCRIPT" "$TEMPLATE_FILE" "$SUBSCRIPTION_PATH" "$CONFIG_FILE"
+if [ "$SOURCE_MODE" = "json" ]; then
+    if [ ! -f "$IMPORT_JSON_SCRIPT" ]; then
+        error "JSON import script not found: $IMPORT_JSON_SCRIPT"
+        exit 1
+    fi
+
+    log "Generating config.json from JSON source..."
+    python3 "$IMPORT_JSON_SCRIPT" "$TEMPLATE_FILE" "$SUBSCRIPTION_PATH" "$CONFIG_FILE"
+else
+    log "Generating config.json from subscription links..."
+    python3 "$GENERATE_SCRIPT" "$TEMPLATE_FILE" "$SUBSCRIPTION_PATH" "$CONFIG_FILE"
+fi
 
 # 4.1 Resolve local port conflicts
 MIXED_PORT=$(find_available_port 7897)
@@ -196,32 +232,25 @@ with open(config_path, "w", encoding="utf-8") as f:
     json.dump(config, f, indent=2)
 PY
 
-# 5. Setup Systemd Service
-log "Setting up systemd service..."
-mkdir -p "$SYSTEMD_DIR"
-mkdir -p "$WORK_DIR/ui"
+# 5. Install sb command
+if [ ! -f "$SB_SCRIPT" ]; then
+    error "sb script not found: $SB_SCRIPT"
+    exit 1
+fi
 
-cat > "$SERVICE_FILE" <<EOF
-[Unit]
-Description=sing-box service
-Documentation=https://sing-box.sagernet.org
-After=network.target nss-lookup.target
+log "Installing sb command to $INSTALL_DIR/sb..."
+install -m 755 "$SB_SCRIPT" "$INSTALL_DIR/sb"
 
-[Service]
-ExecStart=$INSTALL_DIR/sing-box -D $WORK_DIR -C $WORK_DIR run
-WorkingDirectory=$WORK_DIR
-Restart=always
-LimitNOFILE=infinity
+# 6. Setup Systemd Service
+if [ ! -f "$SETUP_SERVICE_SCRIPT" ]; then
+    error "Service setup script not found: $SETUP_SERVICE_SCRIPT"
+    exit 1
+fi
 
-[Install]
-WantedBy=default.target
-EOF
-# Reload systemd
-systemctl --user daemon-reload
-systemctl --user enable "$SERVICE_NAME"
-systemctl --user restart "$SERVICE_NAME"
-
+log "Setting up user-level systemd service..."
+bash "$SETUP_SERVICE_SCRIPT"
 
 log "sing-box service installed and started!"
-log "You can check the status with: systemctl --user status $SERVICE_NAME"
+log "Run 'sb' to open the command menu."
+log "You can check the status with: sb s"
 log "Logs are available via: journalctl --user -u $SERVICE_NAME -f"

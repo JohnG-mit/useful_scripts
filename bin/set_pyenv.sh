@@ -3,32 +3,24 @@
 # 脚本出错时立即退出
 set -e
 
-# --- 预先处理 Sudo 权限 ---
-echo "脚本需要 sudo 权限来安装依赖 (curl 和 git)。"
-# 检查 sudo 权限，仅在凭据过期时提示输入密码。
-if sudo -v; then
-    echo "Sudo 权限已确认，将尝试安装缺失的依赖..."
-else
-    echo "获取 sudo 权限失败。脚本终止。"
-    exit 1
-fi
-
-# --- 自动安装依赖 (curl 和 git) ---
-# 使用 dpkg-query 检查依赖，并使用 sudo 一次性安装
-if ! dpkg-query -W -f='${Status}' curl 2>/dev/null | grep -q "ok installed" || ! dpkg-query -W -f='${Status}' git 2>/dev/null | grep -q "ok installed"; then
-    echo "正在安装缺失的依赖: curl 和 git (需要 sudo)..."
-    if ! (sudo apt update && sudo apt install curl git -y); then
-        echo "依赖安装失败。脚本终止。"
+check_dependencies() {
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "错误：curl 未安装。请先安装 curl 后重试。"
         exit 1
     fi
-else
-    echo "依赖 (curl 和 git) 已安装。"
-fi
+
+    if ! command -v git >/dev/null 2>&1; then
+        echo "错误：git 未安装。请先安装 git 后重试。"
+        exit 1
+    fi
+}
+
+check_dependencies
 
 
 # --- 1. 运行 pyenv-installer ---
 echo "--- 正在运行 pyenv-installer ---"
-curl https://pyenv.run | bash
+curl -fsSL https://pyenv.run | bash
 
 
 # --- 2. 安装 uv 到 ~/bin ---

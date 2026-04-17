@@ -51,21 +51,27 @@ sudo useful_scripts/deploy/uninstall_cron.sh [user]
 ### 功能
 1. 自动下载最新版 sing-box 并安装到 `~/bin`。
 2. 自动下载 `geosite.dat` 和 `geoip.dat` 规则文件。
-3. 根据提供的订阅文件（包含 `vless://`, `hysteria2://`, `tuic://` 链接）生成最终配置文件 `config.json`。
+3. 根据提供的输入源生成最终配置文件 `config.json`（支持订阅链接文件，或 `@xxx.json` JSON 文件模式）。
 4. 配置 systemd user service 实现开机自启和自动重启。
 5. 日志通过 systemd journal 管理，自动轮转。
 
 ### 使用方法
 
-1. 准备一个包含订阅链接的文本文件（例如 `subscribe.txt`），每行一个链接。
+1. 准备输入源（二选一）：
+	- 订阅链接文本文件（例如 `subscribe.txt`），每行一个链接。
+	- JSON 文件（例如 `sub.json`），在安装脚本提示时输入 `@sub.json`。
 2. 运行安装脚本：
 
 ```bash
 bash src/sing-box/install.sh
 ```
 
-3. 脚本会提示输入订阅文件的路径。
+3. 脚本会提示输入路径：
+	- 输入普通路径时按订阅链接文件处理。
+	- 输入 `@xxx.json` 时按 JSON 模式处理。
 4. 安装完成后，服务会自动启动。
+
+JSON 模式会解析并应用 JSON 中的 `outbounds` 等核心字段到最终配置。
 
 ### 管理命令
 
@@ -74,6 +80,32 @@ bash src/sing-box/install.sh
 - 重启服务: `systemctl --user restart sing-box`
 - 查看状态: `systemctl --user status sing-box`
 - 查看日志: `journalctl --user -u sing-box -f`
+
+### sb 命令菜单
+
+安装脚本会自动安装 `sb` 命令到 `~/bin/sb`。
+
+- `sb`：唤起交互菜单
+- `sb s`：查看当前用户级 sing-box 服务状态
+- `sb v`：查看当前 sing-box 内核版本
+- `sb r`：重启当前用户级 sing-box 服务
+- `sb upgrade`：更新 sing-box 内核（自动使用当前代理端口，更新后自动重启并打印新版本）
+- `sb d`：打印当前 sing-box 工作目录
+- `sb ip`：输出当前默认代理出口 IP（含地区信息）
+- `sb speedtest`：测试当前默认代理速度
+- `sb proxy`：打印当前可用代理并交互切换默认代理
+
+代理切换补充：
+- `sb proxy list`：仅打印当前可用代理和当前默认代理
+- `sb proxy <序号>`：按序号切换默认代理
+- `sb proxy <tag>`：按节点标签切换默认代理
+
+`sb speedtest` 会优先调用本机已有的 `speedtest-cli`。
+如果未找到 `speedtest-cli`，会根据系统架构自动下载官方 Ookla CLI 包：
+`https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-$ARCH.tgz`
+
+支持架构：`i386`、`x86_64`、`armel`、`armhf`、`aarch64`。
+下载后会在 `~/bin` 安装 `speedtest`，并生成兼容入口 `speedtest-cli`。
 
 ### 注意事项
 - 确保 `~/bin` 在你的 PATH 环境变量中（脚本会自动尝试添加）。
