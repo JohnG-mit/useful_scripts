@@ -9,6 +9,7 @@ CONFIG_FILE="$WORK_DIR/config.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATE_FILE="$SCRIPT_DIR/config_template.json"
 GENERATE_SCRIPT="$SCRIPT_DIR/generate_config.py"
+PYTHON_BIN="python3"
 
 # Colors
 GREEN='\033[0;32m'
@@ -26,6 +27,30 @@ warn() {
 
 error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+select_python() {
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c 'import yaml' >/dev/null 2>&1; then
+            PYTHON_BIN="python3"
+            return 0
+        fi
+    fi
+
+    if command -v /bin/python3 >/dev/null 2>&1; then
+        if /bin/python3 -c 'import yaml' >/dev/null 2>&1; then
+            PYTHON_BIN="/bin/python3"
+            return 0
+        fi
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+        return 0
+    fi
+
+    error "Python3 未安装"
+    exit 1
 }
 
 show_help() {
@@ -51,10 +76,10 @@ show_help() {
     $(basename "$0") -f ~/new_subs.txt -r             # 替换模式：从模板重新生成
 
 订阅文件格式:
-    每行一个订阅链接，支持以下协议：
-    - vless://
-    - hysteria2://
-    - tuic://
+    支持多种订阅格式：
+    - URI 行订阅（每行一个链接，如 vless:// vmess:// trojan:// ss:// hysteria2:// tuic://）
+    - Mihomo/Clash YAML（含 proxies / proxy-groups）
+    - sing-box JSON（完整配置或 outbounds 列表）
     
     以 # 开头的行会被忽略（注释）
 EOF
@@ -62,10 +87,7 @@ EOF
 
 # 检查依赖
 check_dependencies() {
-    if ! command -v python3 &> /dev/null; then
-        error "Python3 未安装"
-        exit 1
-    fi
+    select_python
     
     if [ ! -f "$GENERATE_SCRIPT" ]; then
         error "找不到配置生成脚本: $GENERATE_SCRIPT"
@@ -128,20 +150,16 @@ validate_subscription() {
         line=$(echo "$line" | tr -d '\r' | xargs)  # 去除空白和回车
         [ -z "$line" ] && continue
         [[ "$line" =~ ^# ]] && continue
-        
-        if [[ "$line" =~ ^(vless|hysteria2|tuic):// ]]; then
-            ((count++))
-        else
-            warn "不支持的协议: ${line:0:30}..."
-        fi
+
+        ((count++))
     done < "$file"
     
     if [ "$count" -eq 0 ]; then
-        error "订阅文件中没有找到有效的链接"
+        error "订阅内容为空或仅包含注释"
         return 1
     fi
     
-    log "找到 $count 个有效订阅链接"
+    log "检测到 $count 行订阅内容，格式校验将由 Python 转换器完成"
     return 0
 }
 
@@ -170,7 +188,7 @@ generate_config() {
         cmd_args+=("--append" "$CONFIG_FILE")
     fi
     
-    if python3 "$GENERATE_SCRIPT" "${cmd_args[@]}"; then
+    if "$PYTHON_BIN" "$GENERATE_SCRIPT" "${cmd_args[@]}"; then
         mv "$temp_config" "$CONFIG_FILE"
         log "配置生成成功: $CONFIG_FILE"
         return 0
@@ -278,12 +296,30 @@ main() {
         esac
     done
     
-    # 检查参数
+    # 无参数时支持直接粘贴 URL 或文件路径
     if [ -z "$source_path" ]; then
-        error "请提供订阅文件路径或URL"
-        echo ""
-        show_help
-        exit 1
+        read -r -p "请输入订阅文件路径或URL: " source_path
+        source_path="$(printf '%s' "$source_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -z "$source_path" ]; then
+            error "请提供订阅文件路径或URL"
+            echo ""
+            show_help
+            exit 1
+        fi
+        if [[ "$source_path" =~ ^https?:// ]]; then
+            source_type="url"
+        else
+            source_type="file"
+        fi
+    fi
+
+    # 去除首尾空白，避免 URL 识别失败
+    source_path="$(printf '%s' "$source_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+    # 如果用户误用 -f 传入 URL，自动切换为 URL 模式
+    if [ "$source_type" = "file" ] && [[ "$source_path" =~ ^https?:// ]]; then
+        warn "检测到 URL 输入，自动切换为 --url 模式"
+        source_type="url"
     fi
     
     # 检查依赖
@@ -327,7 +363,7 @@ main() {
             cmd_args+=("--append" "$CONFIG_FILE")
         fi
         
-        if python3 "$GENERATE_SCRIPT" "${cmd_args[@]}"; then
+        if "$PYTHON_BIN" "$GENERATE_SCRIPT" "${cmd_args[@]}"; then
             log "配置生成成功（未应用）"
             rm -f "$temp_config"
             exit 0

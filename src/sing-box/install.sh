@@ -13,9 +13,11 @@ IMPORT_JSON_SCRIPT="$(dirname "$0")/import_outbounds_json.py"
 SETUP_SERVICE_SCRIPT="$(dirname "$0")/setup_user_service.sh"
 SETUP_LOGROTATE_SCRIPT="$(dirname "$0")/setup_user_logrotate.sh"
 SB_SCRIPT="$(dirname "$0")/sb.sh"
+PYTHON_BIN="python3"
 
 # Colors
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
@@ -23,8 +25,122 @@ log() {
     echo -e "${GREEN}[INFO] $1${NC}"
 }
 
+warn() {
+    echo -e "${YELLOW}[WARN] $1${NC}"
+}
+
 error() {
     echo -e "${RED}[ERROR] $1${NC}"
+}
+
+select_python() {
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c 'import yaml' >/dev/null 2>&1; then
+            PYTHON_BIN="python3"
+            return 0
+        fi
+    fi
+
+    if command -v /bin/python3 >/dev/null 2>&1; then
+        if /bin/python3 -c 'import yaml' >/dev/null 2>&1; then
+            PYTHON_BIN="/bin/python3"
+            return 0
+        fi
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+        return 0
+    fi
+
+    error "Python3 is required but not found."
+    exit 1
+}
+
+download_subscription() {
+    local url="$1"
+    local output="$2"
+
+    log "Downloading subscription from URL..."
+
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsSL "$url" -o "$output"; then
+            log "Subscription downloaded successfully"
+            return 0
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q "$url" -O "$output"; then
+            log "Subscription downloaded successfully"
+            return 0
+        fi
+    fi
+
+    error "Failed to download subscription from URL"
+    return 1
+}
+
+decode_subscription() {
+    local file="$1"
+
+    if head -1 "$file" | grep -qE '^[A-Za-z0-9+/=]+$' && ! head -1 "$file" | grep -qE '://'; then
+        log "Detected base64-like subscription payload, attempting decode..."
+        local decoded_content
+        decoded_content=$(base64 -d "$file" 2>/dev/null) || {
+            warn "Base64 decode failed, keeping original payload"
+            return 0
+        }
+        echo "$decoded_content" > "$file"
+        log "Subscription decode finished"
+    fi
+}
+
+validate_subscription_content() {
+    local file="$1"
+    local count=0
+
+    while IFS= read -r line; do
+        line=$(echo "$line" | tr -d '\r' | xargs)
+        [ -z "$line" ] && continue
+        [[ "$line" =~ ^# ]] && continue
+        ((count++))
+    done < "$file"
+
+    if [ "$count" -eq 0 ]; then
+        error "Subscription content is empty or comments-only"
+        return 1
+    fi
+
+    log "Detected $count lines of subscription content"
+    return 0
+}
+
+precheck_importable() {
+    local source_file="$1"
+    local mode="$2"
+    local temp_output
+
+    temp_output=$(mktemp)
+
+    log "Pre-checking whether subscription is importable..."
+
+    if [ "$mode" = "json" ]; then
+        if ! "$PYTHON_BIN" "$IMPORT_JSON_SCRIPT" "$TEMPLATE_FILE" "$source_file" "$temp_output" >/dev/null; then
+            rm -f "$temp_output"
+            error "Subscription pre-check failed (JSON import mode)"
+            return 1
+        fi
+    else
+        if ! "$PYTHON_BIN" "$GENERATE_SCRIPT" "$TEMPLATE_FILE" "$source_file" "$temp_output" >/dev/null; then
+            rm -f "$temp_output"
+            error "Subscription pre-check failed (multi-format parser mode)"
+            return 1
+        fi
+    fi
+
+    rm -f "$temp_output"
+
+    log "Subscription pre-check passed"
+    return 0
 }
 
 is_port_in_use() {
@@ -87,17 +203,13 @@ stop_existing_singbox() {
     fi
 }
 
-# Check Python
-if ! command -v python3 &> /dev/null; then
-    error "Python3 is required but not found."
-    exit 1
-fi
+select_python
 
 mkdir -p "$INSTALL_DIR"
 
 # 1. Get Subscription File
 echo "Please provide one of the following input sources:"
-echo "1) Subscription links file path (txt, one link per line: vless://, hysteria2://, tuic://)"
+echo "1) Subscription file path or URL (URI lines / Mihomo-Clash YAML / sing-box JSON)"
 echo "2) JSON file path prefixed with @ (example: @sub.json)"
 read -p "Path: " INPUT_PATH
 
@@ -105,6 +217,7 @@ read -p "Path: " INPUT_PATH
 INPUT_PATH="$(printf '%s' "$INPUT_PATH" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
 SOURCE_MODE="links"
+SOURCE_TYPE="file"
 
 case "$INPUT_PATH" in
     @*)
@@ -116,19 +229,46 @@ esac
 # Expand ~ to home directory
 SUBSCRIPTION_PATH="${INPUT_PATH/#\~/$HOME}"
 
+if [[ "$INPUT_PATH" =~ ^https?:// ]]; then
+    SOURCE_TYPE="url"
+fi
+
 if [ "$SOURCE_MODE" = "links" ] && [ "${SUBSCRIPTION_PATH%.json}" != "$SUBSCRIPTION_PATH" ]; then
     SOURCE_MODE="json"
     log "Detected .json file path, switching to JSON import mode."
 fi
 
 # Safety fallback: if path still contains @ prefix, strip it and force JSON mode.
-if [ ! -f "$SUBSCRIPTION_PATH" ] && [ "${SUBSCRIPTION_PATH#@}" != "$SUBSCRIPTION_PATH" ]; then
+if [ "$SOURCE_TYPE" = "file" ] && [ ! -f "$SUBSCRIPTION_PATH" ] && [ "${SUBSCRIPTION_PATH#@}" != "$SUBSCRIPTION_PATH" ]; then
     SOURCE_MODE="json"
     SUBSCRIPTION_PATH="${SUBSCRIPTION_PATH#@}"
 fi
 
-if [ ! -f "$SUBSCRIPTION_PATH" ]; then
+if [ "$SOURCE_TYPE" = "file" ] && [ ! -f "$SUBSCRIPTION_PATH" ]; then
     error "File not found: $SUBSCRIPTION_PATH"
+    exit 1
+fi
+
+TEMP_SUB_FILE=$(mktemp)
+trap 'rm -f "$TEMP_SUB_FILE"' EXIT
+mkdir -p "$WORK_DIR"
+
+if [ "$SOURCE_TYPE" = "url" ]; then
+    download_subscription "$INPUT_PATH" "$TEMP_SUB_FILE" || exit 1
+    SOURCE_MODE="links"
+else
+    cp "$SUBSCRIPTION_PATH" "$TEMP_SUB_FILE"
+fi
+
+decode_subscription "$TEMP_SUB_FILE"
+validate_subscription_content "$TEMP_SUB_FILE" || exit 1
+if ! precheck_importable "$TEMP_SUB_FILE" "$SOURCE_MODE"; then
+    FAILED_SUB_FILE="$WORK_DIR/failed_subscription_$(date +%Y%m%d_%H%M%S).txt"
+    if cp "$TEMP_SUB_FILE" "$FAILED_SUB_FILE" 2>/dev/null; then
+        warn "Downloaded subscription was saved for debugging at: $FAILED_SUB_FILE"
+    else
+        warn "Failed subscription could not be copied for debugging"
+    fi
     exit 1
 fi
 
@@ -157,7 +297,7 @@ else
     esac
 
     # Get Download URL using Python
-    DOWNLOAD_URL=$(python3 -c "
+    DOWNLOAD_URL=$($PYTHON_BIN -c "
 import urllib.request, json, sys
 try:
     url = 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
@@ -209,10 +349,10 @@ if [ "$SOURCE_MODE" = "json" ]; then
     fi
 
     log "Generating config.json from JSON source..."
-    python3 "$IMPORT_JSON_SCRIPT" "$TEMPLATE_FILE" "$SUBSCRIPTION_PATH" "$CONFIG_FILE"
+    "$PYTHON_BIN" "$IMPORT_JSON_SCRIPT" "$TEMPLATE_FILE" "$TEMP_SUB_FILE" "$CONFIG_FILE"
 else
     log "Generating config.json from subscription links..."
-    python3 "$GENERATE_SCRIPT" "$TEMPLATE_FILE" "$SUBSCRIPTION_PATH" "$CONFIG_FILE"
+    "$PYTHON_BIN" "$GENERATE_SCRIPT" "$TEMPLATE_FILE" "$TEMP_SUB_FILE" "$CONFIG_FILE"
 fi
 
 # 4.1 Resolve local port conflicts
@@ -231,7 +371,7 @@ else
     log "Port 9090 is available, using clash API port 9090"
 fi
 
-python3 - "$CONFIG_FILE" "$MIXED_PORT" "$CLASH_API_PORT" <<'PY'
+"$PYTHON_BIN" - "$CONFIG_FILE" "$MIXED_PORT" "$CLASH_API_PORT" <<'PY'
 import json
 import sys
 

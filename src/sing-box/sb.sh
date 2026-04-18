@@ -8,6 +8,8 @@ BIN_PATH="$INSTALL_DIR/sing-box"
 WORK_DIR="$HOME/service/$SERVICE_NAME"
 CONFIG_FILE="$WORK_DIR/config.json"
 SERVICE_FILE="$HOME/.config/systemd/user/$SERVICE_NAME.service"
+SB_CONFIG_DIR="$HOME/.config/sb"
+SB_CONFIG_FILE="$SB_CONFIG_DIR/config"
 
 export PATH="$INSTALL_DIR:$PATH"
 
@@ -35,15 +37,36 @@ show_help() {
 无参数时进入交互菜单。
 
 命令:
-  s, status       查看用户级 sing-box 服务状态
-  v, version      查看 sing-box 内核版本
-  r, restart      重启用户级 sing-box 服务
-  upgrade         更新 sing-box 内核（自动使用当前代理端口）
-  d, dir          打印当前 sing-box 工作目录
-  ip              输出当前默认代理出口 IP 和地区信息
-  speedtest       测试当前默认代理速度
+    s, status       查看用户级 sing-box 服务状态
+    v, version      查看 sing-box 内核版本
+    r, restart      重启用户级 sing-box 服务
+    upgrade         更新 sing-box 内核（自动使用当前代理端口）
+    d, dir          打印当前 sing-box 工作目录
+    ip              输出当前默认代理出口 IP 和地区信息
+    speedtest       测试当前默认代理速度
     p, proxy        打印当前可用代理并支持切换
-  h, help         显示帮助
+    panel, tunnel   一键本地打开远端 clash 面板（SSH 转发）
+    h, help         显示帮助
+EOF
+}
+
+show_panel_help() {
+    cat <<EOF
+用法: sb panel [选项] [user@host]
+
+选项:
+    --host HOST               指定远端主机（例如 user@server）
+    --local-port PORT         指定本地转发端口
+    --print-only              仅打印本地访问地址，不自动打开浏览器
+    --set-default HOST        保存默认远端主机
+    -h, --help                显示此帮助信息
+
+示例:
+    sb panel                     # 仅在 SSH 会话中打开当前机器面板
+    sb panel user@server
+    sb panel --host user@server --local-port 19090
+    sb panel --set-default user@server
+    sb panel --print-only
 EOF
 }
 
@@ -125,6 +148,345 @@ set_proxy_env() {
     export HTTPS_PROXY="http://127.0.0.1:${port}"
     export all_proxy="socks5h://127.0.0.1:${port}"
     export ALL_PROXY="socks5h://127.0.0.1:${port}"
+}
+
+is_port_in_use() {
+    local port="$1"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn "sport = :$port" 2>/dev/null | tail -n +2 | grep -q .
+        return
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+        return
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | grep -E "[.:]$port[[:space:]]" >/dev/null
+        return
+    fi
+
+    return 1
+}
+
+find_available_local_port() {
+    local start_port="$1"
+    local port="$start_port"
+
+    while is_port_in_use "$port"; do
+        port=$((port + 1))
+    done
+
+    echo "$port"
+}
+
+ensure_sb_config_dir() {
+    mkdir -p "$SB_CONFIG_DIR"
+}
+
+get_default_panel_host() {
+    if [ ! -f "$SB_CONFIG_FILE" ]; then
+        return
+    fi
+
+    sed -n 's/^SB_PANEL_DEFAULT_HOST=//p' "$SB_CONFIG_FILE" | tail -n 1
+}
+
+set_default_panel_host() {
+    local host="$1"
+
+    ensure_sb_config_dir
+
+    if [ -f "$SB_CONFIG_FILE" ] && grep -q '^SB_PANEL_DEFAULT_HOST=' "$SB_CONFIG_FILE"; then
+        sed -i "s|^SB_PANEL_DEFAULT_HOST=.*$|SB_PANEL_DEFAULT_HOST=$host|" "$SB_CONFIG_FILE"
+    else
+        echo "SB_PANEL_DEFAULT_HOST=$host" >> "$SB_CONFIG_FILE"
+    fi
+
+    log "Default panel host saved: $host"
+}
+
+get_remote_clash_meta() {
+    local remote_host="$1"
+    local remote_config
+
+    if ! remote_config="$(ssh -o ConnectTimeout=8 "$remote_host" 'cat "$HOME/service/sing-box/config.json"' 2>/dev/null)"; then
+        warn "Failed to read remote config, fallback to 127.0.0.1:9090/ui"
+        echo "127.0.0.1|9090|ui|"
+        return 0
+    fi
+
+    if [ -z "$remote_config" ]; then
+        warn "Remote config is empty, fallback to 127.0.0.1:9090/ui"
+        echo "127.0.0.1|9090|ui|"
+        return 0
+    fi
+
+    python3 - <<'PY' <<< "$remote_config"
+import json
+import sys
+
+raw = sys.stdin.read()
+host = "127.0.0.1"
+port = 9090
+ui = "ui"
+secret = ""
+
+try:
+    data = json.loads(raw)
+    clash = ((data.get("experimental") or {}).get("clash_api") or {})
+
+    external = clash.get("external_controller")
+    if isinstance(external, str) and ":" in external:
+        h, p = external.rsplit(":", 1)
+        if h.strip():
+            host = h.strip()
+        if p.isdigit() and int(p) > 0:
+            port = int(p)
+
+    ui_value = clash.get("external_ui")
+    if isinstance(ui_value, str) and ui_value.strip():
+        ui = ui_value.strip().strip("/")
+
+    secret_value = clash.get("secret")
+    if isinstance(secret_value, str):
+        secret = secret_value
+except Exception:
+    pass
+
+print(f"{host}|{port}|{ui}|{secret}")
+PY
+}
+
+get_local_clash_meta() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        warn "Local config not found, fallback to 127.0.0.1:9090/ui"
+        echo "127.0.0.1|9090|ui|"
+        return 0
+    fi
+
+    python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "127.0.0.1|9090|ui|"
+import json
+import sys
+
+config_path = sys.argv[1]
+host = "127.0.0.1"
+port = 9090
+ui = "ui"
+secret = ""
+
+try:
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    clash = ((data.get("experimental") or {}).get("clash_api") or {})
+
+    external = clash.get("external_controller")
+    if isinstance(external, str) and ":" in external:
+        h, p = external.rsplit(":", 1)
+        if h.strip():
+            host = h.strip()
+        if p.isdigit() and int(p) > 0:
+            port = int(p)
+
+    ui_value = clash.get("external_ui")
+    if isinstance(ui_value, str) and ui_value.strip():
+        ui = ui_value.strip().strip("/")
+
+    secret_value = clash.get("secret")
+    if isinstance(secret_value, str):
+        secret = secret_value
+except Exception:
+    pass
+
+print(f"{host}|{port}|{ui}|{secret}")
+PY
+}
+
+open_local_browser() {
+    local url="$1"
+
+    if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$url" >/dev/null 2>&1 &
+        return 0
+    fi
+
+    if command -v open >/dev/null 2>&1; then
+        open "$url" >/dev/null 2>&1 &
+        return 0
+    fi
+
+    return 1
+}
+
+open_local_panel() {
+    local local_port="$1"
+    local print_only="$2"
+
+    local local_meta controller_host controller_port ui_path secret
+    local_meta="$(get_local_clash_meta)"
+    IFS='|' read -r controller_host controller_port ui_path secret <<< "$local_meta"
+
+    if [ -z "$controller_host" ]; then
+        controller_host="127.0.0.1"
+    fi
+    if ! [[ "$controller_port" =~ ^[0-9]+$ ]] || [ "$controller_port" -le 0 ]; then
+        controller_port="9090"
+    fi
+    if [ -z "$ui_path" ]; then
+        ui_path="ui"
+    fi
+
+    if [ -n "$local_port" ]; then
+        if ! [[ "$local_port" =~ ^[0-9]+$ ]] || [ "$local_port" -le 0 ] || [ "$local_port" -gt 65535 ]; then
+            error "Invalid local port: $local_port"
+            return 1
+        fi
+        controller_port="$local_port"
+    fi
+
+    local panel_url="http://${controller_host}:${controller_port}/${ui_path}"
+    echo "Panel URL: $panel_url"
+
+    if [ -n "$secret" ]; then
+        warn "clash_api secret is enabled. Ensure your panel UI is configured with that secret."
+    fi
+
+    if [ "$print_only" = "false" ]; then
+        if open_local_browser "$panel_url"; then
+            log "Browser opening requested"
+        else
+            warn "Failed to auto-open browser. Please open the URL manually."
+        fi
+    fi
+}
+
+open_remote_panel() {
+    local remote_host=""
+    local local_port=""
+    local print_only="false"
+    local set_default=""
+    local should_connect="true"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --host)
+                remote_host="$2"
+                shift 2
+                ;;
+            --local-port)
+                local_port="$2"
+                shift 2
+                ;;
+            --print-only)
+                print_only="true"
+                shift
+                ;;
+            --set-default)
+                set_default="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_panel_help
+                return 0
+                ;;
+            *)
+                if [ -z "$remote_host" ]; then
+                    remote_host="$1"
+                    shift
+                else
+                    error "Unknown argument: $1"
+                    show_panel_help
+                    return 1
+                fi
+                ;;
+        esac
+    done
+
+    if [ -n "$set_default" ]; then
+        set_default_panel_host "$set_default"
+        if [ -z "$remote_host" ]; then
+            should_connect="false"
+        fi
+    fi
+
+    if [ "$should_connect" = "false" ]; then
+        return 0
+    fi
+
+    # Default behavior:
+    # - in SSH session: open current-machine panel directly
+    # - in non-SSH session: require host/default-host and use tunnel mode
+    if [ -z "$remote_host" ]; then
+        if [ -n "${SSH_CONNECTION:-}" ]; then
+            open_local_panel "$local_port" "$print_only"
+            return $?
+        fi
+
+        remote_host="$(get_default_panel_host)"
+        if [ -z "$remote_host" ]; then
+            error "Remote host is required in local terminal. Use: sb panel user@host or sb panel --set-default user@host"
+            return 1
+        fi
+    fi
+
+    require_command ssh
+    require_command python3
+
+    local remote_meta controller_host controller_port ui_path secret
+    remote_meta="$(get_remote_clash_meta "$remote_host")"
+    IFS='|' read -r controller_host controller_port ui_path secret <<< "$remote_meta"
+
+    if [ -z "$controller_host" ]; then
+        controller_host="127.0.0.1"
+    fi
+    if ! [[ "$controller_port" =~ ^[0-9]+$ ]] || [ "$controller_port" -le 0 ]; then
+        controller_port="9090"
+    fi
+    if [ -z "$ui_path" ]; then
+        ui_path="ui"
+    fi
+
+    if [ -n "$local_port" ]; then
+        if ! [[ "$local_port" =~ ^[0-9]+$ ]] || [ "$local_port" -le 0 ] || [ "$local_port" -gt 65535 ]; then
+            error "Invalid local port: $local_port"
+            return 1
+        fi
+        if is_port_in_use "$local_port"; then
+            error "Local port $local_port is already in use"
+            return 1
+        fi
+    else
+        local_port="$(find_available_local_port "$controller_port")"
+    fi
+
+    local tunnel_spec="127.0.0.1:${local_port}:${controller_host}:${controller_port}"
+    log "Creating SSH tunnel: $remote_host ($tunnel_spec)"
+
+    if ! ssh -o ExitOnForwardFailure=yes -fN -L "$tunnel_spec" "$remote_host"; then
+        error "Failed to establish SSH tunnel"
+        return 1
+    fi
+
+    local panel_url="http://127.0.0.1:${local_port}/${ui_path}"
+    log "Tunnel established"
+    echo "Panel URL: $panel_url"
+
+    if [ -n "$secret" ]; then
+        warn "clash_api secret is enabled on remote side. Ensure your panel UI is configured with that secret."
+    fi
+
+    if [ "$print_only" = "false" ]; then
+        if open_local_browser "$panel_url"; then
+            log "Browser opening requested"
+        else
+            warn "Failed to auto-open browser. Please open the URL manually."
+        fi
+    fi
+
+    echo "Stop tunnel example: pkill -f '$tunnel_spec'"
 }
 
 show_status() {
@@ -720,11 +1082,12 @@ show_menu() {
 6) 查看当前默认代理出口 IP (sb ip)
 7) 测试当前默认代理速度 (sb speedtest)
 8) 打印并切换可用代理 (sb proxy)
+9) 一键本地打开远端 clash 面板 (sb panel)
 0) 退出
 =============================
 EOF
 
-    read -r -p "请选择 [0-8]: " choice
+    read -r -p "请选择 [0-9]: " choice
     case "$choice" in
         1) show_status ;;
         2) show_version ;;
@@ -734,6 +1097,15 @@ EOF
         6) show_proxy_ip ;;
         7) run_speedtest ;;
         8) handle_proxy_command ;;
+        9)
+            read -r -p "请输入远端主机 (user@host，可留空使用默认): " panel_host
+            panel_host="$(printf '%s' "$panel_host" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            if [ -n "$panel_host" ]; then
+                open_remote_panel "$panel_host"
+            else
+                open_remote_panel
+            fi
+            ;;
         0) exit 0 ;;
         *)
             error "无效选项: $choice"
@@ -770,6 +1142,10 @@ main() {
             ;;
         p|proxy)
             handle_proxy_command "${2:-}"
+            ;;
+        panel|tunnel)
+            shift
+            open_remote_panel "$@"
             ;;
         h|help|-h|--help)
             show_help
