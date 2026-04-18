@@ -146,12 +146,12 @@ validate_subscription() {
     local file="$1"
     local count=0
     
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "$line" ]; do
         line=$(echo "$line" | tr -d '\r' | xargs)  # 去除空白和回车
         [ -z "$line" ] && continue
         [[ "$line" =~ ^# ]] && continue
 
-        ((count++))
+        count=$((count + 1))
     done < "$file"
     
     if [ "$count" -eq 0 ]; then
