@@ -41,6 +41,7 @@ show_help() {
     v, version      查看 sing-box 内核版本
     r, restart      重启用户级 sing-box 服务
     upgrade         更新 sing-box 内核（自动使用当前代理端口）
+    self-update     一键更新 sb 脚本到最新版本
     d, dir          打印当前 sing-box 工作目录
     ip              输出当前默认代理出口 IP 和地区信息
     speedtest       测试当前默认代理速度
@@ -321,6 +322,50 @@ open_local_browser() {
     return 1
 }
 
+print_ssh_forward_guidance() {
+    local remote_port="$1"
+    local suggested_local_port="$2"
+    local ui_path="$3"
+    local ssh_user ssh_server ssh_port
+
+    ssh_user="${USER:-user}"
+    ssh_server="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
+    ssh_port="22"
+
+    if [ -n "${SSH_CONNECTION:-}" ]; then
+        ssh_port="$(printf '%s' "$SSH_CONNECTION" | awk '{print $4}')"
+        if [ -z "$ssh_port" ]; then
+            ssh_port="22"
+        fi
+    fi
+
+    if [ -z "$ssh_server" ] && [ -n "${SSH_CONNECTION:-}" ]; then
+        ssh_server="$(printf '%s' "$SSH_CONNECTION" | awk '{print $3}')"
+    fi
+
+    if [ -z "$ssh_server" ]; then
+        ssh_server="server"
+    fi
+
+    if [ -z "$suggested_local_port" ]; then
+        suggested_local_port="$remote_port"
+    fi
+
+    echo ""
+    warn "Detected SSH session. The URL above is on remote localhost and cannot be opened directly on your local browser."
+    echo "Please run the following command on your local machine:"
+    if [ "$ssh_port" = "22" ]; then
+        echo "ssh -N -L ${suggested_local_port}:127.0.0.1:${remote_port} ${ssh_user}@${ssh_server}"
+    else
+        echo "ssh -p ${ssh_port} -N -L ${suggested_local_port}:127.0.0.1:${remote_port} ${ssh_user}@${ssh_server}"
+    fi
+    if [ -z "$ui_path" ]; then
+        ui_path="ui"
+    fi
+    echo "Then open: http://127.0.0.1:${suggested_local_port}/${ui_path}"
+    warn "If local port ${suggested_local_port} is occupied, change it to another available local port."
+}
+
 open_local_panel() {
     local local_port="$1"
     local print_only="$2"
@@ -344,7 +389,6 @@ open_local_panel() {
             error "Invalid local port: $local_port"
             return 1
         fi
-        controller_port="$local_port"
     fi
 
     local panel_url="http://${controller_host}:${controller_port}/${ui_path}"
@@ -354,6 +398,16 @@ open_local_panel() {
         warn "clash_api secret is enabled. Ensure your panel UI is configured with that secret."
     fi
 
+    if [ -n "${SSH_CONNECTION:-}" ]; then
+        local suggested_port
+        suggested_port="$local_port"
+        if [ -z "$suggested_port" ]; then
+            suggested_port="$controller_port"
+        fi
+        print_ssh_forward_guidance "$controller_port" "$suggested_port" "$ui_path"
+        return 0
+    fi
+
     if [ "$print_only" = "false" ]; then
         if open_local_browser "$panel_url"; then
             log "Browser opening requested"
@@ -361,6 +415,41 @@ open_local_panel() {
             warn "Failed to auto-open browser. Please open the URL manually."
         fi
     fi
+}
+
+self_update_sb() {
+    require_command curl
+
+    local update_url tmp_file backup
+    update_url="https://raw.githubusercontent.com/JohnG-mit/useful_scripts/main/src/sing-box/sb.sh"
+    tmp_file="$(mktemp)"
+
+    log "Downloading latest sb script..."
+    if ! curl -fsSL "$update_url" -o "$tmp_file"; then
+        rm -f "$tmp_file"
+        error "Failed to download sb script from remote repository"
+        return 1
+    fi
+
+    if ! bash -n "$tmp_file"; then
+        rm -f "$tmp_file"
+        error "Downloaded sb script failed syntax check"
+        return 1
+    fi
+
+    mkdir -p "$INSTALL_DIR"
+
+    if [ -f "$BIN_PATH" ]; then
+        backup="$BIN_PATH.bak.$(date +%Y%m%d_%H%M%S)"
+        cp "$BIN_PATH" "$backup"
+        log "Backup created: $backup"
+    fi
+
+    install -m 755 "$tmp_file" "$BIN_PATH"
+    rm -f "$tmp_file"
+
+    log "sb updated successfully: $BIN_PATH"
+    log "Run 'hash -r' if your shell still uses an old cached command path"
 }
 
 open_remote_panel() {
@@ -1078,26 +1167,28 @@ show_menu() {
 2) 查看 sing-box 内核版本 (sb v)
 3) 重启 sing-box 服务 (sb r)
 4) 更新 sing-box 内核 (sb upgrade)
-5) 打印 sing-box 工作目录 (sb d)
-6) 查看当前默认代理出口 IP (sb ip)
-7) 测试当前默认代理速度 (sb speedtest)
-8) 打印并切换可用代理 (sb proxy)
-9) 一键本地打开远端 clash 面板 (sb panel)
+5) 一键更新 sb 脚本 (sb self-update)
+6) 打印 sing-box 工作目录 (sb d)
+7) 查看当前默认代理出口 IP (sb ip)
+8) 测试当前默认代理速度 (sb speedtest)
+9) 打印并切换可用代理 (sb proxy)
+10) 一键本地打开远端 clash 面板 (sb panel)
 0) 退出
 =============================
 EOF
 
-    read -r -p "请选择 [0-9]: " choice
+    read -r -p "请选择 [0-10]: " choice
     case "$choice" in
         1) show_status ;;
         2) show_version ;;
         3) restart_service ;;
         4) upgrade_singbox ;;
-        5) show_workdir ;;
-        6) show_proxy_ip ;;
-        7) run_speedtest ;;
-        8) handle_proxy_command ;;
-        9)
+        5) self_update_sb ;;
+        6) show_workdir ;;
+        7) show_proxy_ip ;;
+        8) run_speedtest ;;
+        9) handle_proxy_command ;;
+        10)
             read -r -p "请输入远端主机 (user@host，可留空使用默认): " panel_host
             panel_host="$(printf '%s' "$panel_host" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             if [ -n "$panel_host" ]; then
@@ -1130,6 +1221,9 @@ main() {
             ;;
         upgrade)
             upgrade_singbox
+            ;;
+        self-update)
+            self_update_sb
             ;;
         d|dir|workdir)
             show_workdir
