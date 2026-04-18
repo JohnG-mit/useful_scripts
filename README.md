@@ -1,6 +1,11 @@
 # useful_scripts
 Some useful scripts for linux operation and maintenance.
 
+## 环境配置
+```
+pip install -r requirements.txt
+```
+
 ## traffic_report.py
 
 快速部署说明：
