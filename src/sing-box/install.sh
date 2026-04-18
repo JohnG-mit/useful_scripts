@@ -13,6 +13,7 @@ IMPORT_JSON_SCRIPT="$(dirname "$0")/import_outbounds_json.py"
 SETUP_SERVICE_SCRIPT="$(dirname "$0")/setup_user_service.sh"
 SETUP_LOGROTATE_SCRIPT="$(dirname "$0")/setup_user_logrotate.sh"
 SB_SCRIPT="$(dirname "$0")/sb.sh"
+VPN_SCRIPT="$(cd "$(dirname "$0")" && pwd)/vpn.sh"
 PYTHON_BIN="python3"
 
 # Colors
@@ -31,6 +32,51 @@ warn() {
 
 error() {
     echo -e "${RED}[ERROR] $1${NC}"
+}
+
+get_default_shell_rc() {
+    local shell_name
+    shell_name="$(basename "${SHELL:-}")"
+
+    case "$shell_name" in
+        zsh)
+            echo "$HOME/.zshrc"
+            ;;
+        bash)
+            echo "$HOME/.bashrc"
+            ;;
+        *)
+            echo "$HOME/.profile"
+            ;;
+    esac
+}
+
+setup_vpn_autosource() {
+    local rc_file
+    local source_line
+
+    if [ ! -f "$VPN_SCRIPT" ]; then
+        warn "vpn helper script not found, skip auto-source: $VPN_SCRIPT"
+        return 0
+    fi
+
+    rc_file="$(get_default_shell_rc)"
+    source_line="source \"$VPN_SCRIPT\""
+
+    touch "$rc_file"
+
+    if grep -Fq "$source_line" "$rc_file"; then
+        log "vpn helper already configured in $rc_file"
+        return 0
+    fi
+
+    {
+        echo ""
+        echo "# sing-box vpn helper"
+        echo "$source_line"
+    } >> "$rc_file"
+
+    log "Added vpn helper auto-source to $rc_file"
 }
 
 select_python() {
@@ -411,6 +457,9 @@ fi
 
 log "Installing sb command to $INSTALL_DIR/sb..."
 install -m 755 "$SB_SCRIPT" "$INSTALL_DIR/sb"
+
+# 5.1 Setup vpn helper auto-source for current user's default shell
+setup_vpn_autosource
 
 # 6. Setup Systemd Service
 if [ ! -f "$SETUP_SERVICE_SCRIPT" ]; then

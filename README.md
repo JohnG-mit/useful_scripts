@@ -59,6 +59,7 @@ sudo useful_scripts/deploy/uninstall_cron.sh [user]
 3. 根据提供的输入源生成最终配置文件 `config.json`（支持 URI 订阅、Mihomo/Clash YAML、sing-box JSON，或 `@xxx.json` 模式）。
 4. 配置 systemd user service 实现开机自启和自动重启。
 5. 自动配置用户级文件日志轮转（`~/service/sing-box/*.log`）。
+6. 自动将 `src/sing-box/vpn.sh` 写入用户默认 shell 启动文件（zsh: `~/.zshrc`，bash: `~/.bashrc`，其他回退 `~/.profile`）。
 
 ### 使用方法
 
@@ -80,6 +81,12 @@ bash src/sing-box/install.sh
 	- 输入 `@xxx.json` 时按 JSON 模式处理。
 4. 安装前会先执行导入预检查（不落盘）：若订阅不可解析，会直接中止并提示错误。
 5. 安装完成后，服务会自动启动。
+6. 安装完成后会自动在默认 shell 启动文件追加 `source "<repo>/src/sing-box/vpn.sh"`（幂等，不重复写入）。
+
+vpn 代理快捷函数（由 `vpn.sh` 提供）：
+- `set_proxy`：按当前 `config.json` 的 mixed 端口启用环境变量代理
+- `unset_proxy`：清理代理环境变量
+- `show_proxy`：查看当前代理环境变量状态
 
 如果安装时检测到当前用户已经存在 sing-box 用户级服务或 sing-box 进程，安装脚本会先停止/终止它们，再继续重装。
 
@@ -174,6 +181,24 @@ ssh -N -L 19092:127.0.0.1:9092 user@server
 ```bash
 sb self-update
 hash -r
+```
+
+### 1.1 已部署用户补充 vpn.sh 自动加载
+
+如果是旧版本部署（安装时还未自动写入 `source vpn.sh`），可执行以下任一方式：
+
+方式 A（推荐）：重新运行安装脚本，自动补齐 shell 启动文件写入逻辑。
+
+```bash
+bash src/sing-box/install.sh
+```
+
+方式 B：手动写入默认 shell 启动文件（请将路径替换为你的仓库绝对路径）：
+
+```bash
+echo 'source "/ABS/PATH/useful_scripts/src/sing-box/vpn.sh"' >> ~/.zshrc
+# 或 ~/.bashrc
+source ~/.zshrc
 ```
 
 如果当前 `sb` 版本还没有 `self-update`，可先手动更新一次：
