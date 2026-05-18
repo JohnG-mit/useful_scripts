@@ -251,10 +251,6 @@
         "clash_mode": "Direct"
       },
       {
-        "outbound": "proxy",
-        "clash_mode": "Global"
-      },
-      {
         "rule_set": [
           "geosite-category-ads-all"
         ],
