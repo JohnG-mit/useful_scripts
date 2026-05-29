@@ -222,10 +222,15 @@ set_default_shell() {
     echo "检测到非 zsh 默认 shell。由于当前脚本不依赖 sudo，将仅提示你手动切换："
     echo "chsh -s $zsh_path"
     echo "或者在当前会话中直接执行：exec zsh"
+    echo "或者在.bashrc中添加以下行以自动切换：
+# Auto-start zsh for interactive shells
+if [ -t 1 ] && [ -n "$PS1" ] && [ -z "$ZSH_VERSION" ] && command -v zsh >/dev/null 2>&1; then
+    exec zsh
+fi"
 }
 
 configure_tmux_default_shell() {
-    print_step "步骤 4: 设置 tmux 默认 shell"
+    print_step "步骤 4: 设置 tmux 默认 shell并打开鼠标支持"
 
     local zsh_path
     zsh_path="$(command -v zsh)"
@@ -244,6 +249,7 @@ configure_tmux_default_shell() {
     else
         echo "set-option -g default-shell $zsh_path" >> "$TMUX_CONF_FILE"
     fi
+    echo "set-option -g mouse on" >> "$TMUX_CONF_FILE"
 
     echo "已将 tmux 默认 shell 设置为 $zsh_path。"
 }
@@ -309,7 +315,6 @@ echo "loading ~/.zshrc_vscode" >&2
 alias ll='ls -alFh'
 alias la='ls -A'
 alias l='ls -CF'
-alias map="mamba activate pytorch"
 alias cin="mamba activate"
 alias cout="mamba deactivate"
 
