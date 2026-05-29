@@ -8,6 +8,7 @@ TAILSCALE_BIN="$INSTALL_DIR/tailscale"
 WORK_DIR="$HOME/service/tailscale"
 SOCKET_PATH="$WORK_DIR/tailscaled.sock"
 LOG_FILE="$WORK_DIR/tailscaled.log"
+CRON_ENSURE="$INSTALL_DIR/tailscale-cron-ensure"
 
 export PATH="$INSTALL_DIR:$PATH"
 
@@ -38,7 +39,7 @@ Commands:
     up              Run tailscale up --ssh
     down            Bring Tailscale down
     ssh             Run tailscale ssh
-    r, restart      Restart the user-level tailscaled service
+    r, restart      Restart tailscaled via systemd or cron fallback
     logs            Follow tailscaled file logs
     netcheck        Run Tailscale network diagnostics
     v, version      Show Tailscale version
@@ -57,11 +58,32 @@ require_binary() {
 }
 
 require_socket() {
+    if [ ! -S "$SOCKET_PATH" ] && [ -x "$CRON_ENSURE" ]; then
+        "$CRON_ENSURE" >/dev/null 2>&1 || true
+        wait_for_socket 5 || true
+    fi
+
     if [ ! -S "$SOCKET_PATH" ]; then
         error "tailscaled socket not found: $SOCKET_PATH"
-        error "Please run: systemctl --user restart $SERVICE_NAME"
+        error "Please run: ts restart"
         exit 1
     fi
+}
+
+wait_for_socket() {
+    local max_wait="${1:-20}"
+    local waited=0
+
+    while [ "$waited" -lt "$max_wait" ]; do
+        if [ -S "$SOCKET_PATH" ]; then
+            return 0
+        fi
+
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
 }
 
 tailscale_cmd() {
@@ -95,23 +117,58 @@ tailscale_ssh() {
     tailscale_cmd ssh "$@"
 }
 
-restart_service() {
-    if ! command -v systemctl >/dev/null 2>&1; then
-        error "systemctl not found"
-        exit 1
+kill_socket_tailscaled() {
+    local pid
+
+    if command -v pgrep >/dev/null 2>&1; then
+        for pid in $(pgrep -u "${USER:-$(id -un)}" -x tailscaled 2>/dev/null || true); do
+            if ps -p "$pid" -o args= 2>/dev/null | grep -Fq -- "--socket=$SOCKET_PATH"; then
+                kill "$pid" 2>/dev/null || true
+            fi
+        done
+        return
     fi
 
-    log "Restarting $SERVICE_NAME..."
-    systemctl --user restart "$SERVICE_NAME"
-    sleep 1
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -u "${USER:-$(id -un)}" -f "tailscaled.*--socket=$SOCKET_PATH" 2>/dev/null || true
+    fi
+}
 
-    if systemctl --user is-active --quiet "$SERVICE_NAME"; then
-        log "$SERVICE_NAME restarted successfully"
-    else
+restart_service() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        log "Restarting $SERVICE_NAME via user systemd..."
+        systemctl --user restart "$SERVICE_NAME"
+        sleep 1
+
+        if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+            log "$SERVICE_NAME restarted successfully"
+            return
+        fi
+
         error "$SERVICE_NAME failed to start after restart"
         systemctl --user status "$SERVICE_NAME" --no-pager || true
         exit 1
     fi
+
+    if [ -x "$CRON_ENSURE" ]; then
+        log "Restarting $SERVICE_NAME via cron fallback..."
+        kill_socket_tailscaled
+        sleep 1
+        rm -f "$SOCKET_PATH"
+        "$CRON_ENSURE"
+
+        if wait_for_socket 20; then
+            log "$SERVICE_NAME restarted successfully"
+            return
+        fi
+
+        error "$SERVICE_NAME failed to start after cron fallback restart"
+        exit 1
+    fi
+
+    error "No active user systemd service or cron fallback helper found."
+    error "Please run: bash src/tailscale/install.sh"
+    exit 1
 }
 
 follow_logs() {

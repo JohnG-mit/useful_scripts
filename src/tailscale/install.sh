@@ -11,7 +11,9 @@ SERVICE_NAME="tailscaled"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SETUP_SERVICE_SCRIPT="$SCRIPT_DIR/setup_user_service.sh"
 SETUP_LOGROTATE_SCRIPT="$SCRIPT_DIR/setup_user_logrotate.sh"
+SETUP_CRON_FALLBACK_SCRIPT="$SCRIPT_DIR/setup_cron_fallback.sh"
 TS_SCRIPT="$SCRIPT_DIR/ts.sh"
+SUPERVISOR_MODE="systemd"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -201,14 +203,17 @@ install_tailscale_binary() {
 }
 
 stop_existing_user_tailscaled() {
+    local current_user
     local service_active="false"
     local process_exists="false"
+
+    current_user="${USER:-$(id -un 2>/dev/null || echo user)}"
 
     if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         service_active="true"
     fi
 
-    if command -v pgrep >/dev/null 2>&1 && pgrep -u "$USER" -x tailscaled >/dev/null 2>&1; then
+    if command -v pgrep >/dev/null 2>&1 && pgrep -u "$current_user" -x tailscaled >/dev/null 2>&1; then
         process_exists="true"
     fi
 
@@ -219,7 +224,7 @@ stop_existing_user_tailscaled() {
 
     if [ "$process_exists" = "true" ]; then
         warn "Terminating existing user-owned tailscaled process..."
-        pkill -u "$USER" -x tailscaled || true
+        pkill -u "$current_user" -x tailscaled || true
     fi
 }
 
@@ -231,6 +236,44 @@ install_ts_command() {
 
     log "Installing ts command to $INSTALL_DIR/ts..."
     install -m 755 "$TS_SCRIPT" "$INSTALL_DIR/ts"
+}
+
+select_supervisor() {
+    local current_user
+    current_user="${USER:-$(id -un 2>/dev/null || echo user)}"
+
+    if [ "${TAILSCALE_FORCE_CRON:-}" = "1" ]; then
+        warn "TAILSCALE_FORCE_CRON=1 is set. Using cron fallback supervisor."
+        SUPERVISOR_MODE="cron"
+        return
+    fi
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "systemctl not found. Using cron fallback supervisor."
+        SUPERVISOR_MODE="cron"
+        return
+    fi
+
+    if ! command -v loginctl >/dev/null 2>&1; then
+        warn "loginctl not found. Using cron fallback supervisor."
+        SUPERVISOR_MODE="cron"
+        return
+    fi
+
+    log "Trying to enable linger for user: $current_user"
+    if loginctl enable-linger "$current_user" >/dev/null 2>&1; then
+        log "User linger is enabled. Using user-level systemd supervisor."
+        SUPERVISOR_MODE="systemd"
+    else
+        warn "Failed to enable linger for $current_user. Using cron fallback supervisor."
+        SUPERVISOR_MODE="cron"
+    fi
+}
+
+remove_cron_fallback_if_possible() {
+    if [ -f "$SETUP_CRON_FALLBACK_SCRIPT" ]; then
+        bash "$SETUP_CRON_FALLBACK_SCRIPT" --remove || true
+    fi
 }
 
 wait_for_socket() {
@@ -246,7 +289,12 @@ wait_for_socket() {
     done
 
     error "tailscaled socket was not created: $SOCKET_PATH"
-    systemctl --user status "$SERVICE_NAME" --no-pager || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user status "$SERVICE_NAME" --no-pager || true
+    fi
+    if [ -f "$WORK_DIR/tailscaled.log" ]; then
+        tail -n 80 "$WORK_DIR/tailscaled.log" || true
+    fi
     exit 1
 }
 
@@ -274,7 +322,13 @@ print_connection_info() {
     hostname_text="$(hostname 2>/dev/null || echo host)"
 
     log "Tailscale userspace service is installed and started."
-    log "Service status: systemctl --user status $SERVICE_NAME"
+    if [ "$SUPERVISOR_MODE" = "systemd" ]; then
+        log "Supervisor: systemd user service"
+        log "Service status: systemctl --user status $SERVICE_NAME"
+    else
+        log "Supervisor: user crontab + nohup fallback"
+        log "Cron entries: crontab -l | sed -n '/useful_scripts tailscale cron fallback/,+4p'"
+    fi
     log "Logs: ts logs"
     log "CLI helper: ts status"
 
@@ -286,13 +340,11 @@ print_connection_info() {
     fi
 
     log "MagicDNS/host SSH example: tailscale ssh ${USER}@${hostname_text}"
-    warn "For the user service to survive logout, an admin may need: loginctl enable-linger $USER"
 }
 
 main() {
     require_command uname
     require_command install
-    require_command systemctl
 
     mkdir -p "$WORK_DIR"
     chmod 700 "$WORK_DIR"
@@ -301,24 +353,48 @@ main() {
     ensure_user_bin_path
     stop_existing_user_tailscaled
     install_ts_command
+    select_supervisor
 
-    if [ ! -f "$SETUP_SERVICE_SCRIPT" ]; then
-        error "Service setup script not found: $SETUP_SERVICE_SCRIPT"
-        exit 1
+    if [ "$SUPERVISOR_MODE" = "systemd" ]; then
+        if [ ! -f "$SETUP_SERVICE_SCRIPT" ]; then
+            error "Service setup script not found: $SETUP_SERVICE_SCRIPT"
+            exit 1
+        fi
+
+        log "Setting up user-level tailscaled service..."
+        if bash "$SETUP_SERVICE_SCRIPT"; then
+            remove_cron_fallback_if_possible
+
+            if [ ! -f "$SETUP_LOGROTATE_SCRIPT" ]; then
+                error "Log rotation setup script not found: $SETUP_LOGROTATE_SCRIPT"
+                exit 1
+            fi
+
+            log "Setting up user-level log rotation timer..."
+            bash "$SETUP_LOGROTATE_SCRIPT"
+        else
+            warn "User-level systemd setup failed. Falling back to crontab + nohup."
+            SUPERVISOR_MODE="cron"
+
+            if [ ! -f "$SETUP_CRON_FALLBACK_SCRIPT" ]; then
+                error "Cron fallback setup script not found: $SETUP_CRON_FALLBACK_SCRIPT"
+                exit 1
+            fi
+
+            bash "$SETUP_CRON_FALLBACK_SCRIPT"
+        fi
+    else
+        if [ ! -f "$SETUP_CRON_FALLBACK_SCRIPT" ]; then
+            error "Cron fallback setup script not found: $SETUP_CRON_FALLBACK_SCRIPT"
+            exit 1
+        fi
+
+        log "Setting up crontab + nohup fallback supervisor..."
+        bash "$SETUP_CRON_FALLBACK_SCRIPT"
     fi
 
-    log "Setting up user-level tailscaled service..."
-    bash "$SETUP_SERVICE_SCRIPT"
     wait_for_socket
     run_tailscale_up
-
-    if [ ! -f "$SETUP_LOGROTATE_SCRIPT" ]; then
-        error "Log rotation setup script not found: $SETUP_LOGROTATE_SCRIPT"
-        exit 1
-    fi
-
-    log "Setting up user-level log rotation timer..."
-    bash "$SETUP_LOGROTATE_SCRIPT"
 
     print_connection_info
 }

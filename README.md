@@ -228,11 +228,11 @@ systemctl --user start sing-box-log-rotate.service
 ### 功能
 
 1. 自动下载稳定版 Tailscale，并安装 `tailscale` / `tailscaled` 到 `~/bin`。
-2. 配置用户级 `systemd` 服务：`tailscaled.service`。
+2. 优先配置用户级 `systemd` 服务：`tailscaled.service`，并自动尝试 `loginctl enable-linger "$USER"`。
 3. 使用 `~/service/tailscale/` 保存 socket、state 和 `tailscaled.log`。
 4. 以 userspace networking 模式运行，并监听本地 SOCKS5/HTTP 代理 `127.0.0.1:1055`。
 5. 自动执行 `tailscale up --ssh`，通过浏览器交互登录并启用 Tailscale SSH。
-6. 自动部署用户级日志轮转 timer。
+6. 如果无法启用 linger，则自动安装用户级 crontab + `nohup` fallback，直接保活 userspace `tailscaled`。
 7. 安装 `ts` 辅助命令，统一使用用户态 daemon socket。
 
 ### 使用方法
@@ -268,14 +268,20 @@ tailscale ssh <linux-user>@<host-or-ip>
 - `ts up`：重新执行 `tailscale up --ssh`
 - `ts down`：断开当前 Tailscale
 - `ts ssh user@host`：使用 Tailscale SSH
-- `ts restart` / `ts r`：重启用户级 `tailscaled` 服务
+- `ts restart` / `ts r`：按当前 supervisor 重启 `tailscaled`（user systemd 或 cron fallback）
 - `ts logs`：跟踪 `~/service/tailscale/tailscaled.log`
 - `ts netcheck`：运行网络连通性诊断
 - `ts version` / `ts v`：查看版本
 
 ### 服务和日志
 
-服务文件：
+安装脚本会先尝试：
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+成功后使用用户级 systemd，服务文件为：
 
 ```bash
 ~/.config/systemd/user/tailscaled.service
@@ -289,7 +295,33 @@ systemctl --user restart tailscaled
 systemctl --user stop tailscaled
 ```
 
-日志轮转会自动部署 `tailscale-log-rotate.timer`：
+如果 `loginctl` 不存在、启用 linger 失败，或当前环境无法启动用户级 systemd 服务，脚本会自动切换到 crontab + `nohup` fallback。也可以强制使用 fallback：
+
+```bash
+TAILSCALE_FORCE_CRON=1 bash src/tailscale/install.sh
+```
+
+fallback 会安装：
+
+```bash
+~/bin/tailscale-cron-ensure
+~/bin/tailscale-log-rotate
+```
+
+并写入带标记的 crontab 块：
+
+```cron
+# BEGIN useful_scripts tailscale cron fallback
+SHELL=/bin/bash
+PATH=/home/<user>/bin:/usr/local/bin:/usr/bin:/bin
+* * * * "$HOME/bin/tailscale-cron-ensure" >/dev/null 2>&1
+@hourly "$HOME/bin/tailscale-log-rotate" >/dev/null 2>&1
+# END useful_scripts tailscale cron fallback
+```
+
+fallback 模式下 `systemctl --user status tailscaled` 不再代表真实状态，使用 `ts status`、`ts restart` 和 `ts logs`。
+
+日志轮转在 systemd 模式下由 `tailscale-log-rotate.timer` 触发，在 fallback 模式下由 crontab 的 `@hourly` 触发：
 
 - 检查频率：每小时一次（`OnCalendar=hourly`）
 - 轮转范围：`~/service/tailscale/*.log`
@@ -307,12 +339,14 @@ systemctl --user stop tailscaled
 ```bash
 systemctl --user status tailscale-log-rotate.timer
 systemctl --user start tailscale-log-rotate.service
+# fallback 模式：
+~/bin/tailscale-log-rotate
 ```
 
 ### 注意事项
 
 - userspace networking 不会创建系统级 `tailscale0` 网卡；普通系统命令不会自动走 Tailscale，需要使用 Tailscale SSH 或配置本地代理 `127.0.0.1:1055`。
-- 用户级 systemd 服务在部分服务器上会随用户会话退出而停止；如需退出 SSH 后长期运行，请让管理员执行 `loginctl enable-linger <user>`。
+- 用户级 systemd 服务在部分服务器上会随用户会话退出而停止；脚本会自动尝试启用 linger，失败后使用 crontab + `nohup` fallback。
 - Tailscale SSH 只接受来自 tailnet 的连接，不能通过公网 IP 直接访问。
 - 如果修改过 tailnet ACL，需要确保 SSH policy 允许目标用户和目标设备。
 
