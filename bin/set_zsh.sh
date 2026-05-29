@@ -23,7 +23,7 @@ VSCODE_ZSHRC_FILE="$VSCODE_ZSHRC_DIR/.zshrc"
 
 OS_TYPE="unknown"
 ZSH_RELEASE_VERSION="${ZSH_RELEASE_VERSION:-5.9}"
-ZSH_SOURCE_URL="${ZSH_SOURCE_URL:-https://sourceforge.net/projects/zsh/files/zsh/${ZSH_RELEASE_VERSION}/zsh-${ZSH_RELEASE_VERSION}.tar.xz/download}"
+ZSH_SOURCE_URL="${ZSH_SOURCE_URL:-https://gh-proxy.org/sourceforge/https://sourceforge.net/projects/zsh/files/zsh/${ZSH_RELEASE_VERSION}/zsh-${ZSH_RELEASE_VERSION}.tar.xz/download}"
 ZSH_INSTALL_PREFIX="$TARGET_HOME/.local/opt/zsh-${ZSH_RELEASE_VERSION}"
 ZSH_BUILD_ROOT="$TARGET_HOME/.cache/zsh-build"
 

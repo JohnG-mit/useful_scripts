@@ -34,9 +34,13 @@ error() {
     echo -e "${RED}[ERROR] $1${NC}"
 }
 
+get_default_shell_name() {
+    basename "${SHELL:-sh}"
+}
+
 get_default_shell_rc() {
     local shell_name
-    shell_name="$(basename "${SHELL:-}")"
+    shell_name="$(get_default_shell_name)"
 
     case "$shell_name" in
         zsh)
@@ -45,27 +49,91 @@ get_default_shell_rc() {
         bash)
             echo "$HOME/.bashrc"
             ;;
+        fish)
+            echo "$HOME/.config/fish/config.fish"
+            ;;
         *)
             echo "$HOME/.profile"
             ;;
     esac
 }
 
+ensure_rc_file() {
+    local rc_file="$1"
+    local rc_dir
+
+    rc_dir="$(dirname "$rc_file")"
+    mkdir -p "$rc_dir"
+    touch "$rc_file"
+}
+
+ensure_user_bin_path() {
+    local rc_file
+    local shell_name
+    local path_line
+
+    shell_name="$(get_default_shell_name)"
+    rc_file="$(get_default_shell_rc)"
+
+    ensure_rc_file "$rc_file"
+
+    if [ "$shell_name" = "fish" ]; then
+        path_line='set -gx PATH "$HOME/bin" $PATH'
+    else
+        path_line='export PATH="$HOME/bin:$PATH"'
+    fi
+
+    if grep -Fqx "$path_line" "$rc_file"; then
+        log "$HOME/bin PATH entry already configured in $rc_file"
+    else
+        log "Adding $HOME/bin to PATH in $rc_file..."
+        {
+            echo ""
+            echo "# user-local commands"
+            if [ "$shell_name" = "fish" ]; then
+                echo 'if not contains "$HOME/bin" $PATH'
+                echo "    $path_line"
+                echo "end"
+            else
+                echo "$path_line"
+            fi
+        } >> "$rc_file"
+    fi
+
+    if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
+        export PATH="$HOME/bin:$PATH"
+    fi
+}
+
 setup_vpn_autosource() {
     local rc_file
+    local shell_name
     local source_line
+    local legacy_source_line
 
     if [ ! -f "$VPN_SCRIPT" ]; then
         warn "vpn helper script not found, skip auto-source: $VPN_SCRIPT"
         return 0
     fi
 
+    shell_name="$(get_default_shell_name)"
     rc_file="$(get_default_shell_rc)"
-    source_line="source \"$VPN_SCRIPT\""
 
-    touch "$rc_file"
+    case "$shell_name" in
+        bash|zsh)
+            ;;
+        *)
+            warn "vpn helper auto-source supports bash/zsh only, skip configuring $rc_file"
+            return 0
+            ;;
+    esac
 
-    if grep -Fq "$source_line" "$rc_file"; then
+    source_line=". \"$VPN_SCRIPT\""
+    legacy_source_line="source \"$VPN_SCRIPT\""
+
+    ensure_rc_file "$rc_file"
+
+    if grep -Fq "$source_line" "$rc_file" || grep -Fq "$legacy_source_line" "$rc_file"; then
         log "vpn helper already configured in $rc_file"
         return 0
     fi
@@ -377,11 +445,7 @@ except Exception as e:
 fi
 
 # Add to PATH if not present
-if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
-    log "Adding $HOME/bin to PATH in .zshrc..."
-    echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.zshrc"
-    export PATH="$HOME/bin:$PATH"
-fi
+ensure_user_bin_path
 
 # 3. Prepare Directories
 log "Preparing directories..."
