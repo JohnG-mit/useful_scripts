@@ -221,6 +221,106 @@ systemctl --user start sing-box-log-rotate.service
 - 面板打不开：确认是本机访问还是远端访问场景，SSH 场景必须先做本地端口转发。
 - 订阅导入失败：优先使用 `update_subscription.sh -c` 检查模式观察错误信息。
 
+## Tailscale 普通用户安装（无 sudo）
+
+`src/tailscale/install.sh` 会在普通用户目录下安装 Tailscale，并用 userspace networking 启动 `tailscaled`，适合没有 sudo 或不能创建 `tailscale0` 网卡的环境。安装完成后会启用 Tailscale SSH；外部设备加入同一个 tailnet 后，可以通过 Tailscale IP 或 MagicDNS 直接 SSH。
+
+### 功能
+
+1. 自动下载稳定版 Tailscale，并安装 `tailscale` / `tailscaled` 到 `~/bin`。
+2. 配置用户级 `systemd` 服务：`tailscaled.service`。
+3. 使用 `~/service/tailscale/` 保存 socket、state 和 `tailscaled.log`。
+4. 以 userspace networking 模式运行，并监听本地 SOCKS5/HTTP 代理 `127.0.0.1:1055`。
+5. 自动执行 `tailscale up --ssh`，通过浏览器交互登录并启用 Tailscale SSH。
+6. 自动部署用户级日志轮转 timer。
+7. 安装 `ts` 辅助命令，统一使用用户态 daemon socket。
+
+### 使用方法
+
+```bash
+bash src/tailscale/install.sh
+```
+
+安装过程中如果出现 Tailscale 登录 URL，请复制到浏览器完成授权。完成后可查看状态：
+
+```bash
+ts status
+ts ip -4
+systemctl --user status tailscaled
+```
+
+从另一台已经加入同一 tailnet 的设备连接：
+
+```bash
+ssh <linux-user>@<tailscale-ip>
+tailscale ssh <linux-user>@<host-or-ip>
+```
+
+其中 `<linux-user>` 必须是目标机器上已存在的本地用户。Tailscale SSH 权限还需要 tailnet 的 ACL/SSH policy 允许；默认策略通常允许用户连接自己的设备。
+如果发起连接的客户端本身也是 userspace networking 模式，普通 `ssh <ip>` 不一定有系统路由，优先使用 `tailscale ssh <linux-user>@<host-or-ip>`。
+
+### ts 命令
+
+安装脚本会自动安装 `ts` 到 `~/bin/ts`。
+
+- `ts status` / `ts s`：查看 Tailscale 状态
+- `ts ip`：查看 Tailscale IP
+- `ts up`：重新执行 `tailscale up --ssh`
+- `ts down`：断开当前 Tailscale
+- `ts ssh user@host`：使用 Tailscale SSH
+- `ts restart` / `ts r`：重启用户级 `tailscaled` 服务
+- `ts logs`：跟踪 `~/service/tailscale/tailscaled.log`
+- `ts netcheck`：运行网络连通性诊断
+- `ts version` / `ts v`：查看版本
+
+### 服务和日志
+
+服务文件：
+
+```bash
+~/.config/systemd/user/tailscaled.service
+```
+
+常用管理命令：
+
+```bash
+systemctl --user status tailscaled
+systemctl --user restart tailscaled
+systemctl --user stop tailscaled
+```
+
+日志轮转会自动部署 `tailscale-log-rotate.timer`：
+
+- 检查频率：每小时一次（`OnCalendar=hourly`）
+- 轮转范围：`~/service/tailscale/*.log`
+- 触发条件：单个日志文件超过 20MB
+- 轮转方式：`copytruncate`
+- 历史保留：压缩归档保留 14 天
+
+可选环境变量：
+
+- `TAILSCALE_LOG_MAX_SIZE_MB`（默认 20）
+- `TAILSCALE_LOG_RETENTION_DAYS`（默认 14）
+
+手动检查或触发：
+
+```bash
+systemctl --user status tailscale-log-rotate.timer
+systemctl --user start tailscale-log-rotate.service
+```
+
+### 注意事项
+
+- userspace networking 不会创建系统级 `tailscale0` 网卡；普通系统命令不会自动走 Tailscale，需要使用 Tailscale SSH 或配置本地代理 `127.0.0.1:1055`。
+- 用户级 systemd 服务在部分服务器上会随用户会话退出而停止；如需退出 SSH 后长期运行，请让管理员执行 `loginctl enable-linger <user>`。
+- Tailscale SSH 只接受来自 tailnet 的连接，不能通过公网 IP 直接访问。
+- 如果修改过 tailnet ACL，需要确保 SSH policy 允许目标用户和目标设备。
+
+官方参考：
+- [Userspace networking mode](https://tailscale.com/docs/concepts/userspace-networking)
+- [tailscaled flags](https://tailscale.com/docs/reference/tailscaled)
+- [Tailscale SSH](https://tailscale.com/docs/features/tailscale-ssh)
+
 ## traffic_report.py
 
 快速部署说明：
