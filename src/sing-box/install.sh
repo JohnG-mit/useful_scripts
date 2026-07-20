@@ -14,6 +14,7 @@ SETUP_SERVICE_SCRIPT="$(dirname "$0")/setup_user_service.sh"
 SETUP_LOGROTATE_SCRIPT="$(dirname "$0")/setup_user_logrotate.sh"
 SB_SCRIPT="$(dirname "$0")/sb.sh"
 VPN_SCRIPT="$(cd "$(dirname "$0")" && pwd)/vpn.sh"
+BUNDLED_BINARY="$(cd "$(dirname "$0")/../../bin" 2>/dev/null && pwd)/sing-box"
 PYTHON_BIN="python3"
 
 # Colors
@@ -389,60 +390,74 @@ fi
 # Stop any running user-level sing-box before reinstalling.
 stop_existing_singbox
 
-# 2. Download and Install sing-box
+# 2. Install sing-box from bundled binary
 if [ -f "$INSTALL_DIR/sing-box" ]; then
-    log "sing-box binary already exists at $INSTALL_DIR/sing-box. Skipping download."
+    log "sing-box binary already exists at $INSTALL_DIR/sing-box. Skipping install."
 else
-    log "Checking for latest sing-box release..."
-
-    # Detect Arch
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64)
-            SB_ARCH="amd64"
-            ;;
-        aarch64)
-            SB_ARCH="arm64"
-            ;;
-        *)
-            error "Unsupported architecture: $ARCH"
-            exit 1
-            ;;
-    esac
-
-    # Get Download URL using Python
-    DOWNLOAD_URL=$($PYTHON_BIN -c "
-import urllib.request, json, sys
-try:
-    url = 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
-    with urllib.request.urlopen(url) as response:
-        data = json.loads(response.read().decode())
-        for asset in data['assets']:
-            if 'linux-$SB_ARCH.tar.gz' in asset['name']:
-                print(asset['browser_download_url'])
-                sys.exit(0)
-except Exception as e:
-    print(e, file=sys.stderr)
-    sys.exit(1)
-")
-
-    if [ -z "$DOWNLOAD_URL" ]; then
-        error "Failed to find download URL for sing-box."
+    if [ ! -f "$BUNDLED_BINARY" ]; then
+        error "Bundled sing-box binary not found: $BUNDLED_BINARY"
         exit 1
     fi
-    DOWNLOAD_URL="https://ghproxy.net/${DOWNLOAD_URL}"
 
-    log "Downloading sing-box from $DOWNLOAD_URL..."
-    curl -L -o sing-box.tar.gz "$DOWNLOAD_URL"
-
-    log "Installing sing-box..."
-    tar -xzf sing-box.tar.gz
-    # Find the binary inside the extracted folder
-    EXTRACTED_DIR=$(tar -tf sing-box.tar.gz | head -1 | cut -f1 -d"/")
-    mv "$EXTRACTED_DIR/sing-box" "$INSTALL_DIR/"
-    rm -rf sing-box.tar.gz "$EXTRACTED_DIR"
+    log "Copying bundled sing-box binary to $INSTALL_DIR/sing-box..."
+    cp "$BUNDLED_BINARY" "$INSTALL_DIR/sing-box"
     chmod +x "$INSTALL_DIR/sing-box"
 fi
+
+# 2.x Download-based installation (disabled: now using bundled binary above)
+# if [ -f "$INSTALL_DIR/sing-box" ]; then
+#     log "sing-box binary already exists at $INSTALL_DIR/sing-box. Skipping download."
+# else
+#     log "Checking for latest sing-box release..."
+#
+#     # Detect Arch
+#     ARCH=$(uname -m)
+#     case $ARCH in
+#         x86_64)
+#             SB_ARCH="amd64"
+#             ;;
+#         aarch64)
+#             SB_ARCH="arm64"
+#             ;;
+#         *)
+#             error "Unsupported architecture: $ARCH"
+#             exit 1
+#             ;;
+#     esac
+#
+#     # Get Download URL using Python
+#     DOWNLOAD_URL=$($PYTHON_BIN -c "
+# import urllib.request, json, sys
+# try:
+#     url = 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
+#     with urllib.request.urlopen(url) as response:
+#         data = json.loads(response.read().decode())
+#         for asset in data['assets']:
+#             if 'linux-$SB_ARCH.tar.gz' in asset['name']:
+#                 print(asset['browser_download_url'])
+#                 sys.exit(0)
+# except Exception as e:
+#     print(e, file=sys.stderr)
+#     sys.exit(1)
+# ")
+#
+#     if [ -z "$DOWNLOAD_URL" ]; then
+#         error "Failed to find download URL for sing-box."
+#         exit 1
+#     fi
+#     DOWNLOAD_URL="https://ghproxy.net/${DOWNLOAD_URL}"
+#
+#     log "Downloading sing-box from $DOWNLOAD_URL..."
+#     curl -L -o sing-box.tar.gz "$DOWNLOAD_URL"
+#
+#     log "Installing sing-box..."
+#     tar -xzf sing-box.tar.gz
+#     # Find the binary inside the extracted folder
+#     EXTRACTED_DIR=$(tar -tf sing-box.tar.gz | head -1 | cut -f1 -d"/")
+#     mv "$EXTRACTED_DIR/sing-box" "$INSTALL_DIR/"
+#     rm -rf sing-box.tar.gz "$EXTRACTED_DIR"
+#     chmod +x "$INSTALL_DIR/sing-box"
+# fi
 
 # Add to PATH if not present
 ensure_user_bin_path
