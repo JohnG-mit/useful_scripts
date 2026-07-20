@@ -1,0 +1,9 @@
+patch:
+  # 方案列表：rime 中文（luna_pinyin）置顶，作为默认输入方案
+  schema_list:
+    - schema: luna_pinyin
+
+  # 方案选单热键改为仅 F4，去掉默认的 Control+grave
+  # 避免与 VS Code 终端快捷键 Ctrl+` 冲突
+  switcher/hotkeys:
+    - F4
