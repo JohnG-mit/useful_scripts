@@ -1,7 +1,11 @@
 #!/bin/bash
 
-# 避免 set -u 与 VS Code zsh 集成场景冲突，仅启用出错退出。
+# 仅启用出错退出，避免未定义的外部环境变量中断配置流程。
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/apt-retry.sh
+source "$SCRIPT_DIR/../lib/apt-retry.sh"
 
 TARGET_USER="${SUDO_USER:-$(id -un)}"
 TARGET_HOME="$(eval echo "~${TARGET_USER}")"
@@ -18,8 +22,8 @@ OH_MY_ZSH_DIR="$TARGET_HOME/.oh-my-zsh"
 ZSH_CUSTOM="${ZSH_CUSTOM:-$OH_MY_ZSH_DIR/custom}"
 ZSHRC_FILE="$TARGET_HOME/.zshrc"
 TMUX_CONF_FILE="$TARGET_HOME/.tmux.conf"
-VSCODE_ZSHRC_DIR="$TARGET_HOME/.zshrc_vscode"
-VSCODE_ZSHRC_FILE="$VSCODE_ZSHRC_DIR/.zshrc"
+VSCODE_USER_DIR="$TARGET_HOME/.config/Code/User"
+VSCODE_SETTINGS_FILE="$VSCODE_USER_DIR/settings.json"
 
 OS_TYPE="unknown"
 ZSH_RELEASE_VERSION="${ZSH_RELEASE_VERSION:-5.9}"
@@ -133,6 +137,47 @@ build_and_install_zsh() {
     (cd "$source_dir" && ./configure --prefix="$ZSH_INSTALL_PREFIX" && make && make install)
 }
 
+try_install_zsh_with_apt() {
+    if [ "$OS_TYPE" != "linux" ] || ! command -v apt-get >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local -a privilege_command=()
+    if [ "$(id -u)" -ne 0 ]; then
+        if ! command -v sudo >/dev/null 2>&1; then
+            echo "未找到 sudo，将回落到本地编译安装。"
+            return 1
+        fi
+
+        echo "正在请求 sudo 权限以通过 apt 安装 zsh（密码最多尝试 3 次）..."
+        # sudo 默认在连续 3 次密码验证失败后返回非零状态。
+        if ! sudo -v; then
+            echo "sudo 验证失败或当前用户无 sudo 权限，将回落到本地编译安装。"
+            return 1
+        fi
+        privilege_command=(sudo)
+    fi
+
+    echo "正在通过 apt 安装 zsh..."
+    if ! apt_update_retry "${privilege_command[@]}"; then
+        echo "apt-get update 失败，将回落到本地编译安装。"
+        return 1
+    fi
+    if ! apt_get_retry "${privilege_command[@]}" -- install -y zsh; then
+        echo "apt-get install zsh 失败，将回落到本地编译安装。"
+        return 1
+    fi
+
+    hash -r
+    if command -v zsh >/dev/null 2>&1; then
+        echo "已通过 apt 安装 zsh：$(command -v zsh)"
+        return 0
+    fi
+
+    echo "apt 已完成安装，但 PATH 中仍未找到 zsh，将回落到本地编译安装。"
+    return 1
+}
+
 install_zsh() {
     print_step "步骤 0: 确保可用 zsh"
 
@@ -145,6 +190,11 @@ install_zsh() {
     mkdir -p "$USER_BIN_DIR"
     mkdir -p "$ZSH_BUILD_ROOT"
 
+    if try_install_zsh_with_apt; then
+        return
+    fi
+
+    echo "开始下载源码并将 zsh 编译安装到用户目录。"
     check_zsh_build_tools
 
     case "$OS_TYPE" in
@@ -198,35 +248,105 @@ install_oh_my_zsh() {
 }
 
 configure_theme() {
-    print_step "步骤 2: 修改 Zsh 主题"
-    sed_in_place 's/^ZSH_THEME=.*/ZSH_THEME="af-magic"/' "$ZSHRC_FILE"
-    echo "主题已设置为 af-magic。"
+    print_step "步骤 2: 配置 Ubuntu Bash 风格主题"
+
+    local theme_dir="$ZSH_CUSTOM/themes"
+    local theme_file="$theme_dir/ubuntu-bash.zsh-theme"
+
+    mkdir -p "$theme_dir"
+    cat > "$theme_file" <<'EOF'
+# Ubuntu 24.04 Bash-like prompt: bold green user@host, bold blue cwd,
+# optional yellow Git branch, and the conventional $/# suffix.
+setopt prompt_subst
+ZSH_THEME_GIT_PROMPT_PREFIX=' %F{yellow}('
+ZSH_THEME_GIT_PROMPT_SUFFIX=')%f'
+PROMPT='%B%F{green}%n@%m%f%b:%B%F{blue}%~%f%b$(git_prompt_info)%(!.#.$) '
+EOF
+
+    sed_in_place 's/^ZSH_THEME=.*/ZSH_THEME="ubuntu-bash"/' "$ZSHRC_FILE"
+    echo "主题已设置为 Ubuntu 24.04 Bash 风格。"
+}
+
+configure_sing_box_in_zshrc() {
+    print_step "配置 sing-box Shell 环境"
+
+    append_if_missing "$ZSHRC_FILE" 'export PATH="$HOME/.local/bin:$PATH"'
+    append_if_missing "$ZSHRC_FILE" \
+        '[ ! -r "$HOME/.local/lib/sing-box/current/shell/vpn.sh" ] || . "$HOME/.local/lib/sing-box/current/shell/vpn.sh"'
 }
 
 set_default_shell() {
     print_step "步骤 3: 设置默认 shell"
 
     local zsh_path
-    zsh_path="$(command -v zsh)"
+    local current_shell=""
+    local switch_succeeded=false
+    zsh_path="$(command -v zsh 2>/dev/null || true)"
 
     if [ -z "$zsh_path" ]; then
         echo "未找到 zsh，无法更改 shell。"
         return
     fi
 
-    if [ "${SHELL:-}" = "$zsh_path" ]; then
-        echo "当前 shell 已经是 zsh，跳过。"
+    if command -v getent >/dev/null 2>&1; then
+        current_shell="$(getent passwd "$TARGET_USER" 2>/dev/null | awk -F: '{print $7}')"
+    elif [ "$OS_TYPE" = "macos" ] && command -v dscl >/dev/null 2>&1; then
+        current_shell="$(dscl . -read "/Users/$TARGET_USER" UserShell 2>/dev/null | awk '{print $2}')"
+    fi
+    if [ -z "$current_shell" ]; then
+        current_shell="${SHELL:-}"
+    fi
+
+    if [ "${current_shell##*/}" = "zsh" ]; then
+        echo "用户 $TARGET_USER 的默认 shell 已经是 zsh：$current_shell"
         return
     fi
 
-    echo "检测到非 zsh 默认 shell。由于当前脚本不依赖 sudo，将仅提示你手动切换："
-    echo "chsh -s $zsh_path"
-    echo "或者在当前会话中直接执行：exec zsh"
-    echo "或者在.bashrc中添加以下行以自动切换：
-# Auto-start zsh for interactive shells
-if [ -t 1 ] && [ -n "$PS1" ] && [ -z "$ZSH_VERSION" ] && command -v zsh >/dev/null 2>&1; then
-    exec zsh
-fi"
+    if ! command -v chsh >/dev/null 2>&1; then
+        echo "未找到 chsh 命令，无法自动切换默认 shell。"
+    elif [ "$(id -u)" -eq 0 ]; then
+        echo "正在将用户 $TARGET_USER 的默认 shell 切换为 $zsh_path ..."
+        if chsh -s "$zsh_path" "$TARGET_USER"; then
+            switch_succeeded=true
+        fi
+    elif [ "$(id -un)" = "$TARGET_USER" ]; then
+        if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+            echo "正在使用已授权的 sudo 将用户 $TARGET_USER 的默认 shell 切换为 $zsh_path ..."
+            if sudo chsh -s "$zsh_path" "$TARGET_USER"; then
+                switch_succeeded=true
+            fi
+        else
+            echo "正在将当前用户的默认 shell 切换为 $zsh_path ..."
+            if chsh -s "$zsh_path"; then
+                switch_succeeded=true
+            fi
+        fi
+    else
+        echo "当前身份不是目标用户 $TARGET_USER，无法自动执行 chsh。"
+    fi
+
+    if [ "$switch_succeeded" = true ]; then
+        echo "默认 shell 已成功切换为 $zsh_path，重新登录后生效。"
+        return
+    fi
+
+    echo "自动切换默认 shell 失败，请根据实际权限自行选择执行以下命令："
+    if [ -r /etc/shells ] && ! grep -Fqx "$zsh_path" /etc/shells; then
+        echo "  当前 zsh 路径不在 /etc/shells，先注册："
+        echo "     echo '$zsh_path' | sudo tee -a /etc/shells"
+    fi
+    echo "  以当前用户切换："
+    echo "     chsh -s '$zsh_path'"
+    echo "  由管理员为目标用户切换："
+    echo "     sudo chsh -s '$zsh_path' '$TARGET_USER'"
+    echo "  仅在当前会话中进入 zsh："
+    echo "     exec '$zsh_path'"
+    echo "也可以在 .bashrc 中添加以下内容，在交互式 Bash 中自动进入 zsh："
+    printf '%s\n' \
+        '# Auto-start zsh for interactive shells' \
+        'if [ -t 1 ] && [ -n "$PS1" ] && [ -z "$ZSH_VERSION" ] && command -v zsh >/dev/null 2>&1; then' \
+        '    exec zsh' \
+        'fi'
 }
 
 configure_tmux_default_shell() {
@@ -301,96 +421,227 @@ add_aliases_to_zshrc() {
     echo "Alias 添加完毕。"
 }
 
-generate_vscode_zshrc() {
-    print_step "步骤 9: 生成 VS Code 专用 zshrc"
+configure_vscode_user_settings() {
+    print_step "提前配置 VS Code 用户终端设置"
 
-    mkdir -p "$VSCODE_ZSHRC_DIR"
-    if [ -f "$VSCODE_ZSHRC_FILE" ]; then
-        backup_file "$VSCODE_ZSHRC_FILE"
+    if [ "$OS_TYPE" != "linux" ]; then
+        echo "当前不是 Linux，跳过 terminal.integrated.profiles.linux 配置。"
+        return
     fi
 
-    cat > "$VSCODE_ZSHRC_FILE" <<'EOF'
-echo "loading ~/.zshrc_vscode" >&2
+    local zsh_path
+    zsh_path="$(command -v zsh 2>/dev/null || true)"
+    if [ -z "$zsh_path" ]; then
+        echo "未找到 zsh，无法配置 VS Code 默认终端。"
+        return
+    fi
 
-alias ll='ls -alFh'
-alias la='ls -A'
-alias l='ls -CF'
-alias cin="mamba activate"
-alias cout="mamba deactivate"
+    mkdir -p "$VSCODE_USER_DIR"
 
-# VS Code 专用（精简）
-export PATH="$HOME/.local/bin:$HOME/.pyenv/bin:$PATH"
+    if [ -f "$VSCODE_SETTINGS_FILE" ]; then
+        backup_file "$VSCODE_SETTINGS_FILE"
+    fi
 
-# Initialize pyenv only when available
-export PYENV_ROOT="$HOME/.pyenv"
-if [ -d "$PYENV_ROOT/bin" ]; then
-  export PATH="$PYENV_ROOT/bin:$PATH"
-fi
-if command -v pyenv >/dev/null 2>&1; then
-  eval "$(pyenv init - zsh)" 2>/dev/null || true
-fi
+    if command -v python3 >/dev/null 2>&1; then
+        if ! python3 - "$VSCODE_SETTINGS_FILE" "$zsh_path" <<'PY'
+import json
+import os
+import sys
 
-# Optional user script
-if [ -f "$HOME/script/vpn.zsh" ]; then
-  . "$HOME/script/vpn.zsh"
-fi
 
-# mamba shell hook (keeps activation behavior)
-if command -v mamba >/dev/null 2>&1; then
-  export MAMBA_EXE="$(command -v mamba)"
-elif [ -x "$HOME/.pyenv/versions/miniforge3-latest/bin/mamba" ]; then
-  export MAMBA_EXE="$HOME/.pyenv/versions/miniforge3-latest/bin/mamba"
-else
-  unset MAMBA_EXE
-fi
+def strip_jsonc_comments(text):
+    result = []
+    index = 0
+    in_string = False
+    escaped = False
 
-if [ -n "${MAMBA_EXE:-}" ]; then
-  export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/.local/share/mamba}"
-  __mamba_setup="$($MAMBA_EXE shell hook --shell zsh --root-prefix "$MAMBA_ROOT_PREFIX" 2>/dev/null)" || true
-  if [ -n "$__mamba_setup" ]; then
-    eval "$__mamba_setup"
-  else
-    alias mamba="$MAMBA_EXE"
-  fi
-  unset __mamba_setup
-  alias conda='mamba'
-fi
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
 
-# Simple, clean prompt to avoid noisy output
-PROMPT='%n@%m:%~ %# '
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
 
-# Optional: source VS Code shell integration if available
-if [ "${TERM_PROGRAM:-}" = "vscode" ] && command -v code >/dev/null 2>&1; then
-  . "$(code --locate-shell-integration-path zsh)" 2>/dev/null || true
-fi
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+        elif char == "/" and next_char == "/":
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+        elif char == "/" and next_char == "*":
+            index += 2
+            while index + 1 < len(text) and text[index:index + 2] != "*/":
+                index += 1
+            index = min(index + 2, len(text))
+        else:
+            result.append(char)
+            index += 1
 
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
+    return "".join(result)
+
+
+def strip_trailing_commas(text):
+    result = []
+    index = 0
+    in_string = False
+    escaped = False
+
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == ",":
+            lookahead = index + 1
+            while lookahead < len(text) and text[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(text) and text[lookahead] in "}]":
+                index += 1
+                continue
+
+        result.append(char)
+        index += 1
+
+    return "".join(result)
+
+
+settings_path, zsh_path = sys.argv[1:3]
+settings = {}
+if os.path.isfile(settings_path) and os.path.getsize(settings_path) > 0:
+    with open(settings_path, "r", encoding="utf-8") as settings_file:
+        jsonc = settings_file.read()
+    normalized_json = strip_trailing_commas(strip_jsonc_comments(jsonc)).strip()
+    if normalized_json:
+        try:
+            settings = json.loads(normalized_json)
+        except (json.JSONDecodeError, ValueError) as error:
+            print(f"错误：无法解析现有 VS Code settings.json：{error}", file=sys.stderr)
+            print("已保留原文件及 .bak 备份，未写入新配置。", file=sys.stderr)
+            raise SystemExit(1)
+
+if not isinstance(settings, dict):
+    print("错误：VS Code settings.json 的顶层必须是对象。", file=sys.stderr)
+    raise SystemExit(1)
+
+profiles_key = "terminal.integrated.profiles.linux"
+profiles = settings.get(profiles_key, {})
+if not isinstance(profiles, dict):
+    profiles = {}
+
+profiles.update({
+    "bash": {
+        "path": "bash",
+        "icon": "terminal-bash",
+    },
+    "zsh": {
+        "path": zsh_path,
+    },
+    "fish": {
+        "path": "fish",
+    },
+    "tmux": {
+        "path": "tmux",
+        "icon": "terminal-tmux",
+    },
+    "pwsh": {
+        "path": "pwsh",
+        "icon": "terminal-powershell",
+    },
+})
+profiles.pop("zsh-vscode", None)
+
+settings[profiles_key] = profiles
+settings["terminal.integrated.defaultProfile.linux"] = "zsh"
+settings["terminal.integrated.copyOnSelection"] = True
+settings["terminal.integrated.rightClickBehavior"] = "paste"
+
+temporary_path = f"{settings_path}.tmp"
+with open(temporary_path, "w", encoding="utf-8") as settings_file:
+    json.dump(settings, settings_file, ensure_ascii=False, indent=4)
+    settings_file.write("\n")
+os.replace(temporary_path, settings_path)
+PY
+        then
+            echo "警告：VS Code 用户设置合并失败，跳过该步骤。"
+            return
+        fi
+    elif [ ! -f "$VSCODE_SETTINGS_FILE" ]; then
+        cat > "$VSCODE_SETTINGS_FILE" <<EOF
+{
+    "terminal.integrated.profiles.linux": {
+        "bash": { "path": "bash", "icon": "terminal-bash" },
+        "zsh": { "path": "$zsh_path" },
+        "fish": { "path": "fish" },
+        "tmux": { "path": "tmux", "icon": "terminal-tmux" },
+        "pwsh": { "path": "pwsh", "icon": "terminal-powershell" }
+    },
+    "terminal.integrated.defaultProfile.linux": "zsh",
+    "terminal.integrated.copyOnSelection": true,
+    "terminal.integrated.rightClickBehavior": "paste"
+}
 EOF
+    else
+        echo "警告：未找到 python3，无法安全合并已有的 VS Code JSONC 配置。"
+        echo "已保留原配置，请安装 python3 后重新运行此脚本。"
+        return
+    fi
 
-    echo "已生成 VS Code 专用 zshrc：$VSCODE_ZSHRC_FILE"
+    if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
+        chown "$TARGET_USER" \
+            "$TARGET_HOME/.config" \
+            "$TARGET_HOME/.config/Code" \
+            "$VSCODE_USER_DIR" \
+            "$VSCODE_SETTINGS_FILE"
+        if [ -f "${VSCODE_SETTINGS_FILE}.bak" ]; then
+            chown "$TARGET_USER" "${VSCODE_SETTINGS_FILE}.bak"
+        fi
+    fi
+
+    echo "已配置 VS Code 使用普通 zsh 及 $ZSHRC_FILE：$VSCODE_SETTINGS_FILE"
+    echo "该文件会在 VS Code 安装后自动生效，安装器通常不会覆盖用户设置。"
 }
 
 main() {
     detect_os
     check_dependencies
     install_zsh
+    configure_vscode_user_settings
     install_oh_my_zsh
     configure_theme
+    configure_sing_box_in_zshrc
     set_default_shell
     configure_tmux_default_shell
     install_plugins
     configure_plugins_in_zshrc
     add_aliases_to_zshrc
-    generate_vscode_zshrc
 
     echo "---------------------------------"
     echo "✅ Zsh 环境配置脚本执行完毕！"
-    echo "目标用户: $TARGET_USER"
-    echo "主配置: $ZSHRC_FILE"
-    echo "VS Code 专用配置: $VSCODE_ZSHRC_FILE"
-    echo "zsh 可执行文件: $(command -v zsh)"
+    echo "目标用户：$TARGET_USER"
+    echo "主配置：$ZSHRC_FILE"
+    echo "VS Code 与普通终端共用配置：$ZSHRC_FILE"
+    echo "VS Code 用户设置：$VSCODE_SETTINGS_FILE"
+    echo "Zsh 可执行文件：$(command -v zsh)"
     echo ""
     echo "重要：要使更改完全生效，建议重新登录终端，或先执行 'exec zsh' 启动新会话。"
 }

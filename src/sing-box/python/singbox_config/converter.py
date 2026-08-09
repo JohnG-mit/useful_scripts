@@ -6,6 +6,8 @@ import sys
 import urllib.parse
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .singbox_json import apply_replace as apply_singbox_json_replace
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - runtime dependency hint
@@ -26,9 +28,10 @@ def sanitize_tag(raw: str, fallback: str) -> str:
     if not text:
         text = fallback
     text = urllib.parse.unquote(text)
-    text = re.sub(r"\s+", "-", text)
-    text = re.sub(r"[^A-Za-z0-9._:-]", "-", text)
-    text = re.sub(r"-+", "-", text).strip("-")
+    # sing-box tags support UTF-8 and spaces. Preserve display names from
+    # subscriptions while preventing control characters from breaking output.
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text or fallback
 
 
@@ -63,6 +66,49 @@ def parse_duration(value: Any, default_value: str) -> str:
     return text
 
 
+def duration_seconds(value: str) -> Optional[float]:
+    """Parse the Go-style duration units used by sing-box for comparisons."""
+    text = str(value).strip()
+    if not text:
+        return None
+
+    unit_seconds = {
+        "ns": 1e-9,
+        "us": 1e-6,
+        "µs": 1e-6,
+        "μs": 1e-6,
+        "ms": 1e-3,
+        "s": 1.0,
+        "m": 60.0,
+        "h": 3600.0,
+    }
+    total = 0.0
+    position = 0
+    component = re.compile(r"(\d+(?:\.\d+)?)(ns|us|µs|μs|ms|s|m|h)")
+    for match in component.finditer(text):
+        if match.start() != position:
+            return None
+        total += float(match.group(1)) * unit_seconds[match.group(2)]
+        position = match.end()
+    if position != len(text):
+        return None
+    return total
+
+
+def normalize_urltest_timeouts(interval_value: Any, idle_timeout_value: Any = None) -> Tuple[str, str]:
+    interval = parse_duration(interval_value, "3m")
+    idle_timeout = parse_duration(idle_timeout_value, "30m")
+    interval_seconds = duration_seconds(interval)
+    idle_timeout_seconds = duration_seconds(idle_timeout)
+    if (
+        interval_seconds is not None
+        and idle_timeout_seconds is not None
+        and interval_seconds > idle_timeout_seconds
+    ):
+        idle_timeout = interval
+    return interval, idle_timeout
+
+
 def maybe_decode_base64_blob(text: str) -> Optional[str]:
     compact = "".join(line.strip() for line in text.splitlines() if line.strip())
     if not compact or len(compact) < 16:
@@ -73,7 +119,16 @@ def maybe_decode_base64_blob(text: str) -> Optional[str]:
         decoded = decode_base64_padded(compact)
     except Exception:
         return None
-    if "vless://" in decoded or "vmess://" in decoded or "{\"" in decoded or "proxies:" in decoded:
+    uri_schemes = (
+        "anytls://",
+        "hysteria2://",
+        "ss://",
+        "trojan://",
+        "tuic://",
+        "vless://",
+        "vmess://",
+    )
+    if any(scheme in decoded for scheme in uri_schemes) or "{\"" in decoded or "proxies:" in decoded:
         return decoded
     return None
 
@@ -225,6 +280,89 @@ def parse_tuic_url(url: str, used_tags: Set[str]) -> Dict[str, Any]:
     }
 
 
+def first_query_value(params: Dict[str, List[str]], *names: str) -> Optional[str]:
+    for name in names:
+        values = params.get(name)
+        if values:
+            return values[0]
+    return None
+
+
+def parse_anytls_url(url: str, used_tags: Set[str]) -> Dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qs(parsed.query)
+
+    server = parsed.hostname or ""
+    port = parsed.port or 443
+    password = urllib.parse.unquote(parsed.username or "")
+    if not server:
+        raise ValueError("AnyTLS 链接缺少服务器地址")
+    if not password:
+        raise ValueError("AnyTLS 链接缺少密码")
+
+    sni = first_query_value(params, "sni", "server_name", "peer") or server
+    insecure_value = first_query_value(
+        params,
+        "insecure",
+        "allowInsecure",
+        "skip-cert-verify",
+    )
+    tls: Dict[str, Any] = {
+        "enabled": True,
+        "server_name": sni,
+        "insecure": parse_bool(insecure_value or False),
+    }
+
+    fingerprint = first_query_value(params, "fp", "client-fingerprint")
+    if fingerprint:
+        tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
+
+    alpn = first_query_value(params, "alpn")
+    if alpn:
+        tls["alpn"] = [value for value in alpn.split(",") if value]
+
+    outbound: Dict[str, Any] = {
+        "type": "anytls",
+        "tag": ensure_unique_tag(sanitize_tag(parsed.fragment, "anytls-auto"), used_tags),
+        "server": server,
+        "server_port": port,
+        "password": password,
+        "tls": tls,
+    }
+
+    check_interval = first_query_value(
+        params,
+        "idle_session_check_interval",
+        "idle-session-check-interval",
+        "idleSessionCheckInterval",
+    )
+    if check_interval is not None:
+        outbound["idle_session_check_interval"] = parse_duration(check_interval, "30s")
+
+    timeout = first_query_value(
+        params,
+        "idle_session_timeout",
+        "idle-session-timeout",
+        "idleSessionTimeout",
+    )
+    if timeout is not None:
+        outbound["idle_session_timeout"] = parse_duration(timeout, "30s")
+
+    min_idle = first_query_value(
+        params,
+        "min_idle_session",
+        "min-idle-session",
+        "minIdleSession",
+    )
+    if min_idle is not None:
+        min_idle_value = int(min_idle)
+        if min_idle_value < 0:
+            raise ValueError("AnyTLS min_idle_session 不能为负数")
+        outbound["min_idle_session"] = min_idle_value
+
+    return outbound
+
+
 def parse_trojan_url(url: str, used_tags: Set[str]) -> Dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     params = urllib.parse.parse_qs(parsed.query)
@@ -284,7 +422,7 @@ def parse_ss_url(url: str, used_tags: Set[str]) -> Dict[str, Any]:
 
     def parse_host_port(host_port: str) -> Tuple[str, int]:
         if ":" not in host_port:
-            raise ValueError("invalid host:port in ss link")
+            raise ValueError("SS 链接中的主机和端口无效")
         host, port_text = host_port.rsplit(":", 1)
         return host, int(port_text)
 
@@ -371,6 +509,8 @@ def parse_vmess_url(url: str, used_tags: Set[str]) -> Dict[str, Any]:
 
 
 def parse_uri_line(line: str, used_tags: Set[str]) -> Optional[Dict[str, Any]]:
+    if line.startswith("anytls://"):
+        return parse_anytls_url(line, used_tags)
     if line.startswith("vless://"):
         return parse_vless_url(line, used_tags)
     if line.startswith("hysteria2://"):
@@ -397,9 +537,9 @@ def parse_uri_lines(text: str, used_tags: Set[str]) -> List[Dict[str, Any]]:
             if outbound:
                 outbounds.append(outbound)
             else:
-                print(f"Warning: Unsupported protocol in line: {line[:30]}...")
+                print(f"警告：此行使用了不支持的协议：{line[:30]}...")
         except Exception as exc:
-            print(f"Warning: Failed to parse line {line[:30]}...: {exc}")
+            print(f"警告：无法解析此行 {line[:30]}...：{exc}")
     return outbounds
 
 
@@ -547,7 +687,43 @@ def convert_clash_proxy(proxy: Dict[str, Any], used_tags: Set[str]) -> Optional[
         outbound["tls"] = tls
         return outbound
 
-    print(f"Warning: Unsupported clash/mihomo proxy type: {node_type}")
+    if node_type == "anytls":
+        outbound = {
+            "type": "anytls",
+            "tag": tag,
+            "server": proxy.get("server", ""),
+            "server_port": int(proxy.get("port", 0)),
+            "password": proxy.get("password", ""),
+        }
+        tls = extract_tls_from_common_fields(proxy, proxy.get("server", ""))
+        if not tls:
+            tls = {
+                "enabled": True,
+                "server_name": proxy.get("sni") or proxy.get("server", ""),
+                "insecure": parse_bool(proxy.get("skip-cert-verify")),
+            }
+        outbound["tls"] = tls
+
+        check_interval = proxy.get("idle-session-check-interval")
+        if check_interval is None:
+            check_interval = proxy.get("idle_session_check_interval")
+        if check_interval is not None:
+            outbound["idle_session_check_interval"] = parse_duration(check_interval, "30s")
+
+        timeout = proxy.get("idle-session-timeout")
+        if timeout is None:
+            timeout = proxy.get("idle_session_timeout")
+        if timeout is not None:
+            outbound["idle_session_timeout"] = parse_duration(timeout, "30s")
+
+        min_idle = proxy.get("min-idle-session")
+        if min_idle is None:
+            min_idle = proxy.get("min_idle_session")
+        if min_idle is not None:
+            outbound["min_idle_session"] = int(min_idle)
+        return outbound
+
+    print(f"警告：不支持的 Clash/Mihomo 代理类型：{node_type}")
     return None
 
 
@@ -624,17 +800,25 @@ def convert_clash_groups(
         if group_type == "load-balance":
             mapped_group_type = "url-test"
             print(
-                f"Warning: proxy-group '{group_name}' type 'load-balance' has no direct sing-box equivalent, mapped to urltest."
+                f"警告：代理组 '{group_name}' 的 load-balance 类型没有直接对应的 sing-box 类型，已映射为 urltest。"
             )
 
         if mapped_group_type in {"url-test", "fallback"}:
+            idle_timeout = group.get("idle-timeout")
+            if idle_timeout is None:
+                idle_timeout = group.get("idle_timeout")
+            interval, idle_timeout = normalize_urltest_timeouts(
+                group.get("interval"),
+                idle_timeout,
+            )
             outbound = {
                 "type": "urltest",
                 "tag": group_tag,
                 "outbounds": members,
                 "url": group.get("url") or "https://www.gstatic.com/generate_204",
-                "interval": parse_duration(group.get("interval"), "3m"),
+                "interval": interval,
                 "tolerance": int(group.get("tolerance", 50) or 50),
+                "idle_timeout": idle_timeout,
             }
         else:
             outbound = {
@@ -677,7 +861,7 @@ def convert_clash_groups(
 def parse_clash_or_mihomo_yaml(payload: Dict[str, Any], used_tags: Set[str]) -> List[Dict[str, Any]]:
     proxies = payload.get("proxies") or []
     if not isinstance(proxies, list):
-        raise ValueError("YAML payload has no valid proxies list")
+        raise ValueError("YAML 内容中没有有效的 proxies 列表")
 
     outbounds: List[Dict[str, Any]] = []
     name_to_tag: Dict[str, str] = {}
@@ -729,7 +913,7 @@ def parse_singbox_json(payload: Any, used_tags: Set[str]) -> List[Dict[str, Any]
         raw_outbounds = None
 
     if not isinstance(raw_outbounds, list):
-        raise ValueError("JSON payload must be an outbounds list or object with outbounds")
+        raise ValueError("JSON 内容必须是 outbounds 列表或包含 outbounds 的对象")
 
     outbounds: List[Dict[str, Any]] = []
     if "direct" not in used_tags:
@@ -789,7 +973,7 @@ def detect_and_parse_source(source_text: str, used_tags: Set[str]) -> List[Dict[
         except Exception:
             pass
     elif "proxies:" in stripped or "proxy-groups:" in stripped:
-        raise RuntimeError("PyYAML is required to parse Clash/Mihomo YAML subscriptions. Please install pyyaml.")
+        raise RuntimeError("解析 Clash/Mihomo YAML 订阅需要 PyYAML，请安装 pyyaml。")
 
     # URI line input
     return parse_uri_lines(stripped, used_tags)
@@ -861,6 +1045,8 @@ def merge_existing_group(existing: Dict[str, Any], incoming: Dict[str, Any]) -> 
             existing["url"] = incoming.get("url")
         if not existing.get("interval") and incoming.get("interval"):
             existing["interval"] = incoming.get("interval")
+        if not existing.get("idle_timeout") and incoming.get("idle_timeout"):
+            existing["idle_timeout"] = incoming.get("idle_timeout")
         if not isinstance(existing.get("tolerance"), int) and isinstance(incoming.get("tolerance"), int):
             existing["tolerance"] = incoming.get("tolerance")
 
@@ -889,7 +1075,7 @@ def configure_common_fields(config: Dict[str, Any]) -> None:
                     "type": "remote",
                     "format": "binary",
                     "url": url,
-                    "download_detour": "proxy",
+                    "download_detour": rs.get("download_detour") or "direct",
                 }
             )
         route["rule_set"] = new_rule_sets
@@ -898,7 +1084,7 @@ def configure_common_fields(config: Dict[str, Any]) -> None:
 def main() -> None:
     if len(sys.argv) < 4:
         print(
-            "Usage: python3 generate_config.py <template_path> <subscription_path> <output_path> [--append <existing_config>]"
+            "用法：python3 -m singbox_config <模板路径> <订阅路径> <输出路径> [--append <现有配置>]"
         )
         sys.exit(1)
 
@@ -915,11 +1101,25 @@ def main() -> None:
     if append_mode and existing_config_path and os.path.exists(existing_config_path):
         with open(existing_config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
-        print(f"Append mode: Loading existing config from {existing_config_path}")
+        print(f"追加模式：正在加载现有配置 {existing_config_path}")
     else:
         with open(template_path, "r", encoding="utf-8") as f:
             config = json.load(f)
-        print(f"Replace mode: Loading template from {template_path}")
+        print(f"替换模式：正在加载模板 {template_path}")
+
+    stripped_source = source_text.strip()
+    if not append_mode and stripped_source.startswith(("{", "[")):
+        try:
+            json_source = json.loads(stripped_source)
+            config = apply_singbox_json_replace(config, json_source)
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"错误：无法解析 sing-box JSON：{exc}")
+            sys.exit(1)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        print(f"配置已生成：{output_path}")
+        print(f"已导入 {len(config.get('outbounds', []))} 个出站节点")
+        return
 
     outbounds = config.setdefault("outbounds", [])
     used_tags = {
@@ -931,11 +1131,11 @@ def main() -> None:
     try:
         parsed_outbounds = detect_and_parse_source(source_text, used_tags)
     except Exception as exc:
-        print(f"Error: Failed to parse subscription: {exc}")
+        print(f"错误：无法解析订阅：{exc}")
         sys.exit(1)
 
     if not parsed_outbounds:
-        print("Error: No valid outbounds found in source.")
+        print("错误：订阅源中没有有效的出站节点。")
         sys.exit(1)
 
     existing_tags = {
@@ -988,8 +1188,8 @@ def main() -> None:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
     skipped = len(parsed_outbounds) - added_count
-    print(f"Config generated at {output_path}")
-    print(f"Added {added_count} outbounds (skipped {max(skipped, 0)} duplicates)")
+    print(f"配置已生成：{output_path}")
+    print(f"已添加 {added_count} 个出站节点（跳过 {max(skipped, 0)} 个重复项）")
 
 
 if __name__ == "__main__":

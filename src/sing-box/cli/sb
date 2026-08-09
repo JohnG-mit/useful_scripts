@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -e
+
+SB_CLI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SB_CLI_DIR/../modules/core.sh" ]; then
+    SB_RUNTIME_DIR="$(cd "$SB_CLI_DIR/.." && pwd)"
+else
+    SB_RUNTIME_DIR="${SB_RUNTIME_DIR:-$HOME/.local/lib/sing-box/current}"
+fi
+export SB_RUNTIME_DIR
+[ -f "$SB_RUNTIME_DIR/modules/core.sh" ] || { echo "未找到 sb 运行环境：$SB_RUNTIME_DIR" >&2; exit 1; }
+
+for SB_MODULE in core artifacts service subscription proxy panel diagnostics desktop-proxy updater; do
+    # shellcheck source=/dev/null
+    source "$SB_RUNTIME_DIR/modules/$SB_MODULE.sh"
+done
+unset SB_MODULE
+
+sb_help() {
+    cat <<'EOF'
+用法：sb 命令
+
+命令：
+  service status|restart                 查看状态或重启服务
+  core version|upgrade                   查看版本或升级核心
+  subscription update [选项]            更新订阅
+  proxy list|use 标签|ip|speedtest       管理节点或执行网络检测
+  desktop-proxy enable|disable|status    管理 GNOME 桌面代理
+  panel open [选项]                      打开管理面板
+  workdir                                显示工作目录
+  self-update                            更新 sb 工具
+  help                                   显示帮助
+EOF
+}
+
+sb_menu() {
+    cat <<'EOF'
+========== sb 管理菜单 ==========
+1) 查看服务状态
+2) 查看核心版本
+3) 重启服务
+4) 升级核心
+5) 更新订阅
+6) 显示工作目录
+7) 查看代理出口 IP
+8) 运行网络测速
+9) 列出或切换代理节点
+10) 打开管理面板
+11) 更新 sb 工具
+12) 配置 GNOME 桌面代理
+0) 退出
+=============================
+EOF
+    local choice value
+    read -r -p '请选择 [0-12]：' choice
+    case "$choice" in
+        1) sb_service_status ;; 2) sb_core_version ;; 3) sb_service_restart ;; 4) sb_core_upgrade ;;
+        5) sb_subscription_update ;; 6) printf '%s\n' "$SB_WORK_DIR" ;; 7) sb_proxy_ip ;;
+        8) sb_proxy_speedtest ;; 9) sb_proxy_list; read -r -p '请输入标签或序号（留空取消）：' value; [ -z "$value" ] || sb_proxy_use "$value" ;;
+        10) sb_panel_open ;; 11) sb_self_update ;;
+        12) sb_desktop_proxy_enable ;;
+        0) return ;; *) sb_error "无效选项：$choice"; return 2 ;;
+    esac
+}
+
+case "${1:-}" in
+    '') sb_menu ;;
+    service)
+        case "${2:-}" in status) sb_service_status ;; restart) sb_service_restart ;; *) sb_error '用法：sb service status|restart'; exit 2 ;; esac ;;
+    core)
+        case "${2:-}" in version) sb_core_version ;; upgrade) sb_core_upgrade ;; *) sb_error '用法：sb core version|upgrade'; exit 2 ;; esac ;;
+    subscription)
+        [ "${2:-}" = update ] || { sb_error '用法：sb subscription update [选项]'; exit 2; }
+        shift 2; sb_subscription_update "$@" ;;
+    proxy)
+        case "${2:-}" in
+            list) sb_proxy_list ;; use) sb_proxy_use "${3:-}" ;; ip) sb_proxy_ip ;; speedtest) sb_proxy_speedtest ;;
+            *) sb_error '用法：sb proxy list|use 标签|ip|speedtest'; exit 2 ;;
+        esac ;;
+    desktop-proxy)
+        case "${2:-}" in
+            enable) sb_desktop_proxy_enable ;;
+            disable) sb_desktop_proxy_disable ;;
+            status) sb_desktop_proxy_status ;;
+            *) sb_error '用法：sb desktop-proxy enable|disable|status'; exit 2 ;;
+        esac ;;
+    panel)
+        [ "${2:-}" = open ] || { sb_error '用法：sb panel open [选项]'; exit 2; }
+        shift 2; sb_panel_open "$@" ;;
+    workdir) printf '%s\n' "$SB_WORK_DIR" ;;
+    self-update) sb_self_update ;;
+    help|-h|--help) sb_help ;;
+    *) sb_error "未知命令：$1"; sb_help; exit 2 ;;
+esac
