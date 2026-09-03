@@ -32,21 +32,6 @@ def normalize_outbounds(source: Any) -> List[Dict[str, Any]]:
         outbounds.insert(0, {"type": "direct", "tag": "direct"})
         tags.add("direct")
 
-    if "direct_company_dns" not in tags:
-        direct_index = next(
-            (index for index, item in enumerate(outbounds) if item.get("tag") == "direct"),
-            -1,
-        )
-        outbounds.insert(
-            direct_index + 1,
-            {
-                "type": "direct",
-                "tag": "direct_company_dns",
-                "domain_resolver": "company_dns",
-            },
-        )
-        tags.add("direct_company_dns")
-
     selector = next(
         (item for item in outbounds if item.get("type") == "selector" and item.get("tag") == "proxy"),
         None,
@@ -54,7 +39,7 @@ def normalize_outbounds(source: Any) -> List[Dict[str, Any]]:
     candidates = [
         item["tag"]
         for item in outbounds
-        if item.get("tag") not in {"direct", "direct_company_dns", "proxy"}
+        if item.get("tag") not in {"direct", "proxy"}
     ]
     if not candidates:
         candidates = ["direct"]
@@ -68,7 +53,7 @@ def normalize_outbounds(source: Any) -> List[Dict[str, Any]]:
             for tag in members
             if isinstance(tag, str)
             and tag in tags
-            and tag not in {"proxy", "direct_company_dns"}
+            and tag not in {"proxy"}
         ] if isinstance(members, list) else []
         selector["outbounds"] = members or candidates
         if selector.get("default") not in selector["outbounds"]:

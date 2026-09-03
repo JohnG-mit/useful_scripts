@@ -24,7 +24,7 @@ source "$SB_INSTALLER_DIR/user-environment.sh"
 source "$SB_INSTALLER_DIR/systemd.sh"
 
 sb_install_runtime() {
-    local release previous link
+    local release previous link legacy
     release="$SB_RUNTIME_BASE/releases/$(date +%Y%m%d_%H%M%S).$$"
     mkdir -p "$release"/{cli,modules,python,shell,resources} "$SB_BIN_DIR"
     cp -R "$SB_SOURCE_DIR/modules/." "$release/modules/"
@@ -36,6 +36,11 @@ sb_install_runtime() {
     previous="$(readlink "$SB_RUNTIME_BASE/current" 2>/dev/null || true)"
     link="$SB_RUNTIME_BASE/.current.$$"
     ln -s "$release" "$link"
+    if [ -d "$SB_RUNTIME_BASE/current" ] && [ ! -L "$SB_RUNTIME_BASE/current" ]; then
+        legacy="$SB_RUNTIME_BASE/.current-legacy.$$"
+        mv "$SB_RUNTIME_BASE/current" "$legacy"
+        sb_warn "发现旧版 current 目录，已保留为：$legacy"
+    fi
     mv -Tf "$link" "$SB_RUNTIME_BASE/current"
     [ -z "$previous" ] || ln -sfn "$previous" "$SB_RUNTIME_BASE/previous"
     install -m 755 "$SB_SOURCE_DIR/cli/sb" "$SB_BIN_DIR/sb"
@@ -122,6 +127,7 @@ PY
 }
 
 sb_install_main() {
+    local configure_apt_proxy answer
     export PATH="$SB_BIN_DIR:$PATH"
     mkdir -p "$SB_BIN_DIR" "$SB_RUNTIME_BASE/releases" "$SB_WORK_DIR"
     chmod 700 "$SB_WORK_DIR"
@@ -137,8 +143,18 @@ sb_install_main() {
     sb_install_set_default_proxy
     sb_install_assign_ports
     sb_install_systemd_units
-    if [ "${SB_CONFIGURE_APT_PROXY:-1}" != 0 ]; then
+    configure_apt_proxy="${SB_CONFIGURE_APT_PROXY:-1}"
+    if [ -t 0 ] && [ -t 1 ] && [ -z "${SB_CONFIGURE_APT_PROXY+x}" ]; then
+        printf '是否使用 sudo 将 APT 代理写入 %s？[Y/n] ' "$SB_APT_PROXY_CONFIG"
+        IFS= read -r answer || answer=''
+        case "$answer" in
+            [Nn]|[Nn][Oo]) configure_apt_proxy=0 ;;
+        esac
+    fi
+    if [ "$configure_apt_proxy" != 0 ]; then
         sb_apt_proxy_enable || sb_warn "未配置 APT 代理；可在重新安装时授权 sudo，或设置 SB_CONFIGURE_APT_PROXY=0 跳过"
+    else
+        sb_log "已跳过 APT 代理配置"
     fi
     if [ "${SB_CONFIGURE_DESKTOP_PROXY:-1}" != 0 ]; then
         sb_desktop_proxy_enable || sb_warn "未配置 GNOME 桌面代理，请在桌面会话中运行 'sb desktop-proxy enable'"

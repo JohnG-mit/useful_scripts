@@ -56,6 +56,23 @@ sb_artifact_verify() {
     }
 }
 
+sb_artifact_prepare() {
+    local url="$1" file="$2" expected="$3" temp
+    mkdir -p "$(dirname "$file")" || return 1
+    if [ -f "$file" ] && sb_artifact_verify "$file" "$expected"; then
+        sb_log "复用已缓存制品：$(basename "$file")"
+        return 0
+    fi
+    [ ! -e "$file" ] || rm -f "$file"
+    temp="$file.new.$$"
+    rm -f "$temp"
+    sb_log "正在下载制品：$(basename "$file")..."
+    sb_artifact_download "$url" "$temp" || { rm -f "$temp"; return 1; }
+    sb_artifact_verify "$temp" "$expected" || { rm -f "$temp"; return 1; }
+    chmod 600 "$temp" || { rm -f "$temp"; return 1; }
+    mv -f "$temp" "$file" || { rm -f "$temp"; return 1; }
+}
+
 sb_core_arch() {
     local machine
     machine="$(uname -m)"
@@ -78,10 +95,8 @@ sb_artifact_install_core() (
     url="$(sb_artifact_url "$filename" "$source_url")" || return 1
     temp_dir="$(sb_make_temp_dir)" || return 1
     trap 'rm -rf "$temp_dir"' EXIT
-    archive="$temp_dir/$filename"
-    sb_log "正在下载锁定版本 sing-box $version ($arch)..."
-    sb_artifact_download "$url" "$archive" || return 1
-    sb_artifact_verify "$archive" "$sha" || return 1
+    archive="$SB_RUNTIME_BASE/artifacts/$filename"
+    sb_artifact_prepare "$url" "$archive" "$sha" || return 1
     sb_require_command tar || return 1
     tar -xzf "$archive" -C "$temp_dir" || return 1
     extracted="$temp_dir/sing-box-$version-linux-$arch/sing-box"
@@ -107,11 +122,9 @@ sb_artifact_install_ui() (
     url="$(sb_artifact_url "$filename" "$source_url")" || return 1
     temp_dir="$(sb_make_temp_dir)" || return 1
     trap 'rm -rf "$temp_dir"' EXIT
-    archive="$temp_dir/$filename"
+    archive="$SB_RUNTIME_BASE/artifacts/$filename"
     extracted="$temp_dir/extracted"
-    sb_log "正在下载锁定版本 Zashboard $version..."
-    sb_artifact_download "$url" "$archive" || return 1
-    sb_artifact_verify "$archive" "$sha" || return 1
+    sb_artifact_prepare "$url" "$archive" "$sha" || return 1
     sb_require_command unzip || return 1
     mkdir -p "$extracted" || return 1
     unzip -q "$archive" -d "$extracted" || return 1

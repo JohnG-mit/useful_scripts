@@ -13,7 +13,7 @@ bash sing-box/installer/install.sh --url 'https://example.com/subscription'
 
 安装器会将命令写入 `~/.local/bin`，将带版本的运行文件写入 `~/.local/lib/sing-box`，将服务数据写入 `~/service/sing-box`，并在 `~/.config/systemd/user` 中创建用户级 systemd 单元。
 
-安装器从官方 Release 下载仓库锁定版本的 sing-box 与 Zashboard，并在 SHA256、归档结构和版本检查通过后安装。Zashboard 下载失败时核心安装继续进行，但管理面板暂不可用。`cache.db` 由 sing-box 在服务目录中运行时生成，重复安装不会覆盖现有缓存。
+安装器从官方 Release 下载仓库锁定版本的 sing-box 与 Zashboard，并在 SHA256、归档结构和版本检查通过后安装。已校验的归档缓存于 `~/.local/lib/sing-box/artifacts`，重复安装会复用缓存；若锁定清单中的 SHA256 变化或缓存损坏，则自动重新下载。Zashboard 下载失败时核心安装继续进行，但管理面板暂不可用。`cache.db` 由 sing-box 在服务目录中运行时生成，重复安装不会覆盖现有缓存。
 
 安装过程需要 Python 3、systemd 用户会话、`tar`、`unzip`、`sha256sum`，以及 `curl` 或 `wget`。若订阅为 Clash/Mihomo YAML，则 Python 环境需要 PyYAML。
 
@@ -26,7 +26,7 @@ chmod 600 "$HOME/subscription.txt"
 bash sing-box/installer/install.sh --file "$HOME/subscription.txt"
 ```
 
-安装器会在动态端口确定且 sing-box 服务启动后，通过 `sudo` 写入 `/etc/apt/apt.conf.d/99sing-box-proxy`。之后直接执行 `sudo apt update` 或 `sudo apt install ...` 时，APT 的 HTTP/HTTPS 请求会使用 sing-box mixed 代理。该配置随重复安装更新，不依赖 `sudo` 保留当前 Shell 的代理环境变量。若不希望配置 APT，可在安装前设置：
+安装器会在动态端口确定且 sing-box 服务启动后，交互询问是否通过 `sudo` 写入 `/etc/apt/apt.conf.d/99sing-box-proxy`；直接回车表示启用，输入 `n` 表示跳过。启用后直接执行 `sudo apt update` 或 `sudo apt install ...` 时，APT 的 HTTP/HTTPS 请求会使用 sing-box mixed 代理。该配置随重复安装更新，不依赖 `sudo` 保留当前 Shell 的代理环境变量。非交互安装默认启用；若不希望配置 APT，可在安装前设置：
 
 ```bash
 export SB_CONFIGURE_APT_PROXY=0
