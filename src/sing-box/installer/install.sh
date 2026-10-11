@@ -131,6 +131,7 @@ sb_install_main() {
     export PATH="$SB_BIN_DIR:$PATH"
     mkdir -p "$SB_BIN_DIR" "$SB_RUNTIME_BASE/releases" "$SB_WORK_DIR"
     chmod 700 "$SB_WORK_DIR"
+    sb_ensure_user_systemd_env
     if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet "$SB_SERVICE_NAME" 2>/dev/null; then
         systemctl --user stop "$SB_SERVICE_NAME"
     fi

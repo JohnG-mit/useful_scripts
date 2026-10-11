@@ -35,6 +35,18 @@ sb_require_command() {
     }
 }
 
+sb_ensure_user_systemd_env() {
+    local runtime_dir bus_path
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "$runtime_dir" ]; then
+        export XDG_RUNTIME_DIR="$runtime_dir"
+    fi
+    bus_path="${XDG_RUNTIME_DIR:-$runtime_dir}/bus"
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$bus_path" ]; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"
+    fi
+}
+
 sb_require_config() {
     [ -f "$SB_CONFIG_FILE" ] || {
         sb_error "未找到配置文件：$SB_CONFIG_FILE"

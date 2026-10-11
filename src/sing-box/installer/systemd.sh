@@ -2,6 +2,7 @@
 
 sb_install_systemd_units() {
     sb_require_command systemctl || return
+    sb_ensure_user_systemd_env
     mkdir -p "$SB_SYSTEMD_DIR" "$SB_WORK_DIR/ui"
     local service_temp rotate_temp timer_temp
     service_temp="$(mktemp)"; rotate_temp="$(mktemp)"; timer_temp="$(mktemp)"

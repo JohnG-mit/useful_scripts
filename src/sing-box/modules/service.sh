@@ -5,7 +5,8 @@ sb_service_require_unit() {
         sb_error "未找到用户服务文件：$SB_SERVICE_FILE"
         return 1
     }
-    sb_require_command systemctl
+    sb_require_command systemctl || return
+    sb_ensure_user_systemd_env
 }
 
 sb_service_require_running() {

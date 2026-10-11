@@ -133,15 +133,123 @@ def maybe_decode_base64_blob(text: str) -> Optional[str]:
     return None
 
 
+def clash_ws_host(data: Dict[str, Any]) -> str:
+    ws_opts = data.get("ws-opts") or {}
+    if not isinstance(ws_opts, dict):
+        return ""
+    headers = ws_opts.get("headers") or {}
+    if not isinstance(headers, dict):
+        return ""
+    host = headers.get("Host") or headers.get("host")
+    return str(host) if host else ""
+
+
+def resolve_clash_server_name(data: Dict[str, Any], server_name_default: str = "") -> str:
+    server_name = data.get("servername") or data.get("sni")
+    if server_name:
+        return str(server_name)
+    host = clash_ws_host(data)
+    if host:
+        return host
+    return server_name_default
+
+
+def apply_clash_reality(data: Dict[str, Any], tls: Dict[str, Any]) -> None:
+    reality_opts = data.get("reality-opts") or data.get("reality_opts")
+    if not isinstance(reality_opts, dict):
+        return
+    public_key = reality_opts.get("public-key") or reality_opts.get("public_key")
+    short_id = reality_opts.get("short-id") or reality_opts.get("short_id")
+    if not public_key:
+        return
+    tls["reality"] = {
+        "enabled": True,
+        "public_key": str(public_key),
+        "short_id": "" if short_id is None else str(short_id),
+    }
+
+
+def apply_clash_transport(proxy: Dict[str, Any], outbound: Dict[str, Any]) -> None:
+    network = str(proxy.get("network") or "").lower()
+    if network == "ws":
+        ws_opts = proxy.get("ws-opts") or {}
+        if not isinstance(ws_opts, dict):
+            ws_opts = {}
+        headers = ws_opts.get("headers") or {}
+        if not isinstance(headers, dict):
+            headers = {}
+        outbound["transport"] = {
+            "type": "ws",
+            "path": ws_opts.get("path", "/") or "/",
+            "headers": headers,
+        }
+        return
+    if network == "grpc":
+        grpc_opts = proxy.get("grpc-opts") or {}
+        if not isinstance(grpc_opts, dict):
+            grpc_opts = {}
+        outbound["transport"] = {
+            "type": "grpc",
+            "service_name": grpc_opts.get("grpc-service-name", "") or "",
+        }
+        return
+    if network == "http":
+        http_opts = proxy.get("http-opts") or {}
+        if not isinstance(http_opts, dict):
+            http_opts = {}
+        transport: Dict[str, Any] = {"type": "http"}
+        path = http_opts.get("path")
+        if isinstance(path, list) and path:
+            transport["path"] = str(path[0])
+        elif path:
+            transport["path"] = str(path)
+        headers = http_opts.get("headers")
+        if isinstance(headers, dict):
+            normalized = {}
+            for key, value in headers.items():
+                if isinstance(value, list) and value:
+                    normalized[str(key)] = str(value[0])
+                elif value is not None:
+                    normalized[str(key)] = str(value)
+            if normalized:
+                transport["headers"] = normalized
+        host = http_opts.get("host")
+        if isinstance(host, list) and host:
+            transport["host"] = [str(item) for item in host]
+        elif isinstance(host, str) and host:
+            transport["host"] = [host]
+        outbound["transport"] = transport
+
+
+def clash_hysteria_server_ports(proxy: Dict[str, Any]) -> Optional[List[str]]:
+    raw = proxy.get("ports") or proxy.get("mport") or proxy.get("server_ports")
+    if raw is None:
+        return None
+    values: List[str] = []
+    if isinstance(raw, list):
+        candidates = raw
+    else:
+        candidates = [part.strip() for part in str(raw).split(",") if part.strip()]
+    for item in candidates:
+        text = str(item).strip()
+        if not text:
+            continue
+        text = text.replace("-", ":")
+        values.append(text)
+    return values or None
+
+
 def extract_tls_from_common_fields(data: Dict[str, Any], server_name_default: str = "") -> Optional[Dict[str, Any]]:
     skip_cert = data.get("skip-cert-verify")
-    server_name = data.get("servername") or data.get("sni") or server_name_default
+    server_name = resolve_clash_server_name(data, server_name_default)
+    reality_opts = data.get("reality-opts") or data.get("reality_opts")
     should_enable = any(
         [
             parse_bool(data.get("tls")),
             data.get("network") in {"ws", "grpc", "http"},
             bool(server_name),
             skip_cert is not None,
+            isinstance(reality_opts, dict) and bool(reality_opts),
         ]
     )
     if not should_enable:
@@ -154,6 +262,7 @@ def extract_tls_from_common_fields(data: Dict[str, Any], server_name_default: st
     fingerprint = data.get("client-fingerprint") or data.get("fp")
     if fingerprint:
         tls["utls"] = {"enabled": True, "fingerprint": str(fingerprint)}
+    apply_clash_reality(data, tls)
     return tls
 
 
@@ -601,6 +710,7 @@ def convert_clash_proxy(proxy: Dict[str, Any], used_tags: Set[str]) -> Optional[
         tls = extract_tls_from_common_fields(proxy, proxy.get("server", ""))
         if tls:
             outbound["tls"] = tls
+        apply_clash_transport(proxy, outbound)
         return outbound
 
     if node_type == "vless":
@@ -610,12 +720,15 @@ def convert_clash_proxy(proxy: Dict[str, Any], used_tags: Set[str]) -> Optional[
             "server": proxy.get("server", ""),
             "server_port": int(proxy.get("port", 0)),
             "uuid": proxy.get("uuid", ""),
-            "flow": proxy.get("flow", ""),
             "packet_encoding": "xudp",
         }
+        flow = str(proxy.get("flow") or "").strip()
+        if flow:
+            outbound["flow"] = flow
         tls = extract_tls_from_common_fields(proxy, proxy.get("server", ""))
         if tls:
             outbound["tls"] = tls
+        apply_clash_transport(proxy, outbound)
         return outbound
 
     if node_type == "vmess":
@@ -631,22 +744,7 @@ def convert_clash_proxy(proxy: Dict[str, Any], used_tags: Set[str]) -> Optional[
         tls = extract_tls_from_common_fields(proxy, proxy.get("server", ""))
         if tls:
             outbound["tls"] = tls
-
-        network = proxy.get("network")
-        if network == "ws":
-            ws_opts = proxy.get("ws-opts") or {}
-            outbound["transport"] = {
-                "type": "ws",
-                "path": ws_opts.get("path", "/"),
-                "headers": ws_opts.get("headers") or {},
-            }
-        elif network == "grpc":
-            grpc_opts = proxy.get("grpc-opts") or {}
-            outbound["transport"] = {
-                "type": "grpc",
-                "service_name": grpc_opts.get("grpc-service-name", ""),
-            }
-
+        apply_clash_transport(proxy, outbound)
         return outbound
 
     if node_type == "hysteria2":
@@ -657,6 +755,9 @@ def convert_clash_proxy(proxy: Dict[str, Any], used_tags: Set[str]) -> Optional[
             "server_port": int(proxy.get("port", 0)),
             "password": proxy.get("password", ""),
         }
+        server_ports = clash_hysteria_server_ports(proxy)
+        if server_ports:
+            outbound["server_ports"] = server_ports
         tls = extract_tls_from_common_fields(proxy, proxy.get("server", ""))
         if not tls:
             tls = {
@@ -664,7 +765,16 @@ def convert_clash_proxy(proxy: Dict[str, Any], used_tags: Set[str]) -> Optional[
                 "server_name": proxy.get("sni") or proxy.get("server", ""),
                 "insecure": parse_bool(proxy.get("skip-cert-verify")),
             }
+        if "alpn" not in tls:
+            tls["alpn"] = ["h3"]
         outbound["tls"] = tls
+        obfs = proxy.get("obfs")
+        obfs_password = proxy.get("obfs-password") or proxy.get("obfs_password")
+        if obfs:
+            outbound["obfs"] = {
+                "type": str(obfs),
+                "password": str(obfs_password or ""),
+            }
         return outbound
 
     if node_type == "tuic":
