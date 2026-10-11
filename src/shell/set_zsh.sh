@@ -9,9 +9,9 @@ source "$SCRIPT_DIR/../lib/apt-retry.sh"
 
 TARGET_USER="${SUDO_USER:-$(id -un)}"
 TARGET_HOME="$(eval echo "~${TARGET_USER}")"
-USER_BIN_DIR="$TARGET_HOME/bin"
+LOCAL_BIN_DIR="$TARGET_HOME/.local/bin"
 
-export PATH="$USER_BIN_DIR:$PATH"
+export PATH="$LOCAL_BIN_DIR:$PATH"
 
 if [ ! -d "$TARGET_HOME" ]; then
     echo "错误：未找到用户 ${TARGET_USER} 的家目录。"
@@ -183,12 +183,10 @@ install_zsh() {
 
     if command -v zsh >/dev/null 2>&1; then
         echo "zsh 已安装，跳过安装。"
-        mkdir -p "$USER_BIN_DIR"
         return
     fi
 
-    mkdir -p "$USER_BIN_DIR"
-    mkdir -p "$ZSH_BUILD_ROOT"
+    mkdir -p "$LOCAL_BIN_DIR" "$ZSH_BUILD_ROOT"
 
     if try_install_zsh_with_apt; then
         return
@@ -214,11 +212,11 @@ install_zsh() {
     fi
 
     if [ -x "$ZSH_INSTALL_PREFIX/bin/zsh" ]; then
-        ln -sf "$ZSH_INSTALL_PREFIX/bin/zsh" "$USER_BIN_DIR/zsh"
+        ln -sf "$ZSH_INSTALL_PREFIX/bin/zsh" "$LOCAL_BIN_DIR/zsh"
     fi
 
-    if ! command -v zsh >/dev/null 2>&1 && [ -x "$USER_BIN_DIR/zsh" ]; then
-        export PATH="$USER_BIN_DIR:$PATH"
+    if ! command -v zsh >/dev/null 2>&1 && [ -x "$LOCAL_BIN_DIR/zsh" ]; then
+        export PATH="$LOCAL_BIN_DIR:$PATH"
     fi
 
     if ! command -v zsh >/dev/null 2>&1; then
