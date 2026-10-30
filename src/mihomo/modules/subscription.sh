@@ -31,16 +31,27 @@ mo_subscription_download() {
         http://*) mo_warn "订阅 URL 使用明文 HTTP，令牌可能泄露" ;;
         *) mo_error "订阅 URL 必须以 https:// 开头"; return 1 ;;
     esac
-    if curl -fsSL --noproxy '*' --connect-timeout 15 --max-time 60 -A "$MO_SUB_USER_AGENT" "$url" -o "$output" 2>/dev/null; then
-        return 0
-    fi
-    if systemctl --user is-active --quiet "$MO_SERVICE_NAME" 2>/dev/null; then
-        port="$(mo_get_mixed_port)"
-        mo_warn "直连下载订阅失败，尝试经本机代理（127.0.0.1:$port）"
-        curl -fsSL --connect-timeout 15 --max-time 60 -A "$MO_SUB_USER_AGENT" \
-            -x "http://127.0.0.1:$port" "$url" -o "$output" && return 0
-    fi
-    mo_error "下载订阅失败"
+    local base=(-fsSL --connect-timeout 15 --max-time 60) err='' attempt
+    local env_proxy="${https_proxy:-${HTTPS_PROXY:-${all_proxy:-${ALL_PROXY:-}}}}"
+    # Attempts, in order: the shell's own proxy settings (same as a manual curl), forced direct,
+    # curl's default User-Agent, and finally the local mihomo proxy when the service is running.
+    for attempt in env direct plain-ua local; do
+        case "$attempt" in
+            env)
+                [ -n "$env_proxy" ] || continue
+                err="$(curl "${base[@]}" -A "$MO_SUB_USER_AGENT" "$url" -o "$output" 2>&1)" && return 0 ;;
+            direct)
+                err="$(curl "${base[@]}" --noproxy '*' -A "$MO_SUB_USER_AGENT" "$url" -o "$output" 2>&1)" && return 0 ;;
+            plain-ua)
+                err="$(curl "${base[@]}" "$url" -o "$output" 2>&1)" && return 0 ;;
+            local)
+                systemctl --user is-active --quiet "$MO_SERVICE_NAME" 2>/dev/null || continue
+                port="$(mo_get_mixed_port)"
+                err="$(curl "${base[@]}" -A "$MO_SUB_USER_AGENT" -x "http://127.0.0.1:$port" "$url" -o "$output" 2>&1)" && return 0 ;;
+        esac
+        mo_warn "下载订阅失败（方式：$attempt）：${err##*$'\n'}"
+    done
+    mo_error "下载订阅失败。可先手动 curl 保存为文件，再用 mo sub --file 文件 导入"
     return 1
 }
 
