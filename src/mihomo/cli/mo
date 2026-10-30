@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# mo - manage the user-level mihomo service.
+
+MO_CLI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$MO_CLI_DIR/../modules/core.sh" ]; then
+    MO_RUNTIME_DIR="$(cd "$MO_CLI_DIR/.." && pwd)"
+else
+    MO_RUNTIME_DIR="${MO_RUNTIME_DIR:-$HOME/.local/lib/mihomo/current}"
+fi
+export MO_RUNTIME_DIR
+[ -f "$MO_RUNTIME_DIR/modules/core.sh" ] || { echo "未找到 mo 运行环境：$MO_RUNTIME_DIR" >&2; exit 1; }
+
+for MO_MODULE in core artifacts service subscription proxy diagnostics updater cron tun desktop-proxy apt-proxy panel uninstall; do
+    # shellcheck source=/dev/null
+    source "$MO_RUNTIME_DIR/modules/$MO_MODULE.sh"
+done
+unset MO_MODULE
+
+mo_help() {
+    cat <<'EOF'
+用法：mo [命令]      （不带命令时进入序号菜单）
+
+服务：
+  s, status              查看用户级服务状态（失败时自动测试配置）
+  r, restart             重启服务（失败时自动测试配置）
+  log [-f|行数]          查看服务日志
+核心：
+  v, version             查看核心版本与可升级版本
+  upgrade [--force]      升级核心
+订阅：
+  sub [URL|文件]         导入新的订阅链接或 yaml 文件
+  sync                   同步已保存的订阅
+  regen                  用缓存的订阅重新生成配置（修改 override.yaml 后使用）
+  cron                   设置/修改/取消自动同步（二级菜单）
+  t, test                测试配置文件
+节点与诊断：
+  l, list [-g 组] [节点]  列出并切换代理节点
+  ip                     查看代理出口 IP
+  speed                  运行网络测速
+  ui                     打开 Web 管理面板
+  d, dir                 显示工作目录
+系统集成：
+  tun on|off|status      TUN 透明代理开关
+  desktop on|off|status  GNOME 桌面代理
+  apt on|off|status      APT 代理
+  uninstall              卸载
+  h, help                显示帮助
+
+终端代理请使用 vpn_on / vpn_off / vpn_s。
+EOF
+}
+
+mo_pause() {
+    [ -t 0 ] || return 0
+    read -r -p '按回车返回菜单...' _ || true
+}
+
+mo_menu_choose_switch() {
+    local title="$1" fn="$2" value
+    read -r -p "$title (on/off/status)：" value || return 0
+    "$fn" "$value"
+}
+
+mo_menu() {
+    local choice
+    while true; do
+        cat <<'EOF'
+
+============== mo 管理菜单 ==============
+ 1) 查看服务状态            2) 重启服务
+ 3) 查看核心版本            4) 升级核心
+ 5) 同步订阅                6) 导入新订阅
+ 7) 列出并切换节点          8) 测试配置文件
+ 9) 显示工作目录           10) 查看代理出口 IP
+11) 网络测速               12) 自动同步设置
+13) 打开 Web 面板          14) 查看服务日志
+15) TUN 透明代理           16) 桌面代理 (GNOME)
+17) APT 代理               18) 卸载
+ 0) 退出
+=========================================
+EOF
+        read -r -p '请选择 [0-18]：' choice || return 0
+        case "$choice" in
+            1) mo_service_status ;;
+            2) mo_service_restart ;;
+            3) mo_core_version ;;
+            4) mo_core_upgrade ;;
+            5) mo_subscription_sync ;;
+            6) mo_subscription_update ;;
+            7) mo_proxy_list ;;
+            8) mo_config_test ;;
+            9) printf '%s\n' "$MO_WORK_DIR" ;;
+            10) mo_proxy_ip ;;
+            11) mo_proxy_speedtest ;;
+            12) mo_cron_menu; continue ;;
+            13) mo_panel_open ;;
+            14) mo_service_log ;;
+            15) mo_menu_choose_switch 'TUN' mo_tun ;;
+            16) mo_menu_choose_switch '桌面代理' mo_desktop_cmd ;;
+            17) mo_menu_choose_switch 'APT 代理' mo_apt_cmd ;;
+            18) mo_uninstall ;;
+            0|q|'') return 0 ;;
+            *) mo_error "无效选项：$choice"; continue ;;
+        esac
+        mo_pause
+    done
+}
+
+mo_desktop_cmd() {
+    case "${1:-status}" in
+        on|enable) mo_desktop_proxy_enable ;;
+        off|disable) mo_desktop_proxy_disable ;;
+        status) mo_desktop_proxy_status ;;
+        *) mo_error "用法：mo desktop on|off|status"; return 2 ;;
+    esac
+}
+
+mo_apt_cmd() {
+    case "${1:-status}" in
+        on|enable) mo_apt_proxy_enable ;;
+        off|disable) mo_apt_proxy_disable ;;
+        status) mo_apt_proxy_status ;;
+        *) mo_error "用法：mo apt on|off|status"; return 2 ;;
+    esac
+}
+
+cmd="${1:-}"
+[ "$#" -eq 0 ] || shift
+case "$cmd" in
+    '') mo_menu ;;
+    s|status) mo_service_status ;;
+    r|restart) mo_service_restart ;;
+    log|logs) mo_service_log "$@" ;;
+    v|version) mo_core_version ;;
+    upgrade|update) mo_core_upgrade "$@" ;;
+    sub|subscribe) mo_subscription_update "$@" ;;
+    sync) mo_subscription_sync "$@" ;;
+    regen) mo_subscription_update --raw "$@" ;;
+    cron) mo_cron "$@" ;;
+    t|test) mo_config_test "$@" ;;
+    l|list|ls) mo_proxy_list "$@" ;;
+    ip) mo_proxy_ip ;;
+    speed|speedtest) mo_proxy_speedtest ;;
+    ui|panel) mo_panel_open "$@" ;;
+    d|dir|workdir) printf '%s\n' "$MO_WORK_DIR" ;;
+    tun) mo_tun "$@" ;;
+    desktop) mo_desktop_cmd "$@" ;;
+    apt) mo_apt_cmd "$@" ;;
+    uninstall) mo_uninstall ;;
+    h|help|-h|--help) mo_help ;;
+    *) mo_error "未知命令：$cmd"; mo_help; exit 2 ;;
+esac
