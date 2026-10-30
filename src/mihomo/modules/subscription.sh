@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-MO_SUB_USER_AGENT="${MO_SUB_USER_AGENT:-clash.meta}"
-
 mo_subscription_help() {
     cat <<'EOF'
 用法：mo sub [选项] [订阅URL|订阅文件]
@@ -34,20 +32,18 @@ mo_subscription_download() {
     local base=(-fsSL --connect-timeout 15 --max-time 60) err='' attempt
     local env_proxy="${https_proxy:-${HTTPS_PROXY:-${all_proxy:-${ALL_PROXY:-}}}}"
     # Attempts, in order: the shell's own proxy settings (same as a manual curl), forced direct,
-    # curl's default User-Agent, and finally the local mihomo proxy when the service is running.
-    for attempt in env direct plain-ua local; do
+    # and finally the local mihomo proxy when the service is running.
+    for attempt in env direct local; do
         case "$attempt" in
             env)
                 [ -n "$env_proxy" ] || continue
-                err="$(curl "${base[@]}" -A "$MO_SUB_USER_AGENT" "$url" -o "$output" 2>&1)" && return 0 ;;
-            direct)
-                err="$(curl "${base[@]}" --noproxy '*' -A "$MO_SUB_USER_AGENT" "$url" -o "$output" 2>&1)" && return 0 ;;
-            plain-ua)
                 err="$(curl "${base[@]}" "$url" -o "$output" 2>&1)" && return 0 ;;
+            direct)
+                err="$(curl "${base[@]}" --noproxy '*' "$url" -o "$output" 2>&1)" && return 0 ;;
             local)
                 systemctl --user is-active --quiet "$MO_SERVICE_NAME" 2>/dev/null || continue
                 port="$(mo_get_mixed_port)"
-                err="$(curl "${base[@]}" -A "$MO_SUB_USER_AGENT" -x "http://127.0.0.1:$port" "$url" -o "$output" 2>&1)" && return 0 ;;
+                err="$(curl "${base[@]}" -x "http://127.0.0.1:$port" "$url" -o "$output" 2>&1)" && return 0 ;;
         esac
         mo_warn "下载订阅失败（方式：$attempt）：${err##*$'\n'}"
     done
