@@ -59,6 +59,15 @@ class MergeTests(unittest.TestCase):
     def test_base64_subscription_is_not_clash(self):
         self.assertIsNone(merge.parse_clash_yaml("c3M6Ly9hYmM="))
 
+    def test_find_process_mode_off_survives_yaml_11(self):
+        # Bare `off` is a YAML 1.1 bool; mihomo needs the string enum.
+        sub = CLASH_SUB + "find-process-mode: off\n"
+        config, _ = merge.build_config(sub, TEMPLATE, OVERRIDE)
+        self.assertEqual(config["find-process-mode"], "off")
+        dumped = merge.dump_config(config)
+        self.assertRegex(dumped, r"(?m)^find-process-mode:\s+'?off'?\s*$")
+        self.assertNotRegex(dumped, r"(?m)^find-process-mode:\s+false\s*$")
+
     def test_gh_proxy_placeholder(self):
         config, _ = merge.build_config(CLASH_SUB, TEMPLATE, OVERRIDE, gh_proxy="https://m.example")
         self.assertTrue(config["geox-url"]["geoip"].startswith("https://m.example/https://github.com/"))

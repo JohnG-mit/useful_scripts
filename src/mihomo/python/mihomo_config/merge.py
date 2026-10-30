@@ -39,6 +39,20 @@ def load_yaml_file(path: str) -> Any:
         return yaml.safe_load(handle)
 
 
+# PyYAML (YAML 1.1) turns bare off/on/yes/no into bools. Mihomo wants strings here.
+_BOOLISH_STRING_KEYS = {
+    "find-process-mode": {False: "off", True: "always"},
+}
+
+
+def normalize_boolish_strings(config: dict) -> dict:
+    """Restore mihomo string enums that YAML 1.1 coerced to bool."""
+    for key, mapping in _BOOLISH_STRING_KEYS.items():
+        if key in config and isinstance(config[key], bool):
+            config[key] = mapping[config[key]]
+    return config
+
+
 def parse_clash_yaml(text: str) -> dict | None:
     """Return the parsed mapping when text is a Clash/Mihomo YAML profile, else None."""
     try:
@@ -46,7 +60,7 @@ def parse_clash_yaml(text: str) -> dict | None:
     except yaml.YAMLError:
         return None
     if isinstance(data, dict) and ("proxies" in data or "proxy-providers" in data):
-        return data
+        return normalize_boolish_strings(data)
     return None
 
 
@@ -94,7 +108,7 @@ def build_config(
         provider["path"] = provider_path
         provider_content = source_text if source_text.endswith("\n") else source_text + "\n"
 
-    config = deep_merge(base, substitute(override, gh_proxy))
+    config = normalize_boolish_strings(deep_merge(base, substitute(override, gh_proxy)))
 
     tun = config.get("tun")
     if isinstance(tun, dict) and tun.get("enable"):

@@ -20,7 +20,10 @@ mo_subscription_saved_source() {
     [ -f "$MO_SOURCE_FILE" ] && head -n1 "$MO_SOURCE_FILE" || true
 }
 
-# Download a subscription: direct first, then through the local proxy if mihomo is running.
+# Download a subscription. Prefer the shell proxy (same as a manual curl), then
+# forced direct, then the local mihomo mixed-port when the service is up.
+# Pi/Cloudflare paths often black-hole IPv6 and stall on connect, so we force
+# IPv4, bound each connect, and retry a few times instead of one long hang.
 mo_subscription_download() {
     local url="$1" output="$2" port
     mo_require_command curl || return 1
@@ -29,22 +32,22 @@ mo_subscription_download() {
         http://*) mo_warn "订阅 URL 使用明文 HTTP，令牌可能泄露" ;;
         *) mo_error "订阅 URL 必须以 https:// 开头"; return 1 ;;
     esac
-    # No connect timeout of our own: a plain `curl -o` waits as long as the OS allows, and some servers are slow to accept.
-    local base=(-fsSL --max-time 300) err='' attempt
+    # Keep retries modest: a dead Cloudflare path on Pi can burn minutes otherwise.
+    local base=(-fsSL -4 --connect-timeout 15 --max-time 90 --retry 2 --retry-delay 2 --retry-all-errors)
+    local err='' attempt
     local env_proxy="${https_proxy:-${HTTPS_PROXY:-${all_proxy:-${ALL_PROXY:-}}}}"
-    # Attempts, in order: the shell's own proxy settings (same as a manual curl), forced direct,
-    # and finally the local mihomo proxy when the service is running.
-    for attempt in env direct local; do
+    # Prefer an already-running local proxy before flaky direct paths (common on Pi → CF).
+    for attempt in env local direct; do
         case "$attempt" in
             env)
                 [ -n "$env_proxy" ] || continue
                 err="$(curl "${base[@]}" "$url" -o "$output" 2>&1)" && return 0 ;;
-            direct)
-                err="$(curl "${base[@]}" --noproxy '*' "$url" -o "$output" 2>&1)" && return 0 ;;
             local)
                 systemctl --user is-active --quiet "$MO_SERVICE_NAME" 2>/dev/null || continue
                 port="$(mo_get_mixed_port)"
                 err="$(curl "${base[@]}" -x "http://127.0.0.1:$port" "$url" -o "$output" 2>&1)" && return 0 ;;
+            direct)
+                err="$(curl "${base[@]}" --noproxy '*' "$url" -o "$output" 2>&1)" && return 0 ;;
         esac
         mo_warn "下载订阅失败（方式：$attempt）：${err##*$'\n'}"
     done
