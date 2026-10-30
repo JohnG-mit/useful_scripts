@@ -29,7 +29,8 @@ mo_subscription_download() {
         http://*) mo_warn "订阅 URL 使用明文 HTTP，令牌可能泄露" ;;
         *) mo_error "订阅 URL 必须以 https:// 开头"; return 1 ;;
     esac
-    local base=(-fsSL --connect-timeout 15 --max-time 60) err='' attempt
+    # No connect timeout of our own: a plain `curl -o` waits as long as the OS allows, and some servers are slow to accept.
+    local base=(-fsSL --max-time 300) err='' attempt
     local env_proxy="${https_proxy:-${HTTPS_PROXY:-${all_proxy:-${ALL_PROXY:-}}}}"
     # Attempts, in order: the shell's own proxy settings (same as a manual curl), forced direct,
     # and finally the local mihomo proxy when the service is running.
